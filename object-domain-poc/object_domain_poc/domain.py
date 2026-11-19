@@ -1,343 +1,322 @@
 from __future__ import annotations
 
 import operator
-import weakref
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable
 from typing import Any
 
+import numpy as np
 
-class ObjectBinaryOp:
-    """An eager Python binary operation for object-domain values."""
-
-    def __init__(self, function: Callable[[object, object], object], *, name: str | None = None):
-        if not callable(function):
-            raise TypeError("function must be callable")
-        self.function = function
-        self.name = name or getattr(function, "__name__", type(function).__name__)
-
-    def __call__(self, left: object, right: object) -> object:
-        return self.function(left, right)
-
-    def __repr__(self) -> str:
-        return f"ObjectBinaryOp({self.name!r})"
+import graphblas as gb
 
 
-class ObjectMonoid:
-    """A binary operation and identity used for deterministic reduction."""
-
-    def __init__(
-        self,
-        function: ObjectBinaryOp | Callable[[object, object], object],
-        identity: object,
-        *,
-        name: str | None = None,
-    ):
-        self.binary = _as_binary(function)
-        self.identity = identity
-        self.name = name or self.binary.name
-
-    def __repr__(self) -> str:
-        return f"ObjectMonoid({self.name!r}, identity={self.identity!r})"
+_ABSENT = object()
+_MAX_HANDLE = np.iinfo(np.uint64).max
 
 
 class ObjectDomain:
-    """Owner and validity boundary for Python-managed sparse object containers."""
+    """Strong-reference owner for opaque handles stored by SuiteSparse."""
+
+    __slots__ = ("_handles_by_identity", "_objects", "_next_handle", "__weakref__")
 
     def __init__(self) -> None:
-        self._closed = False
-        self._containers: weakref.WeakSet[_ObjectSparse] = weakref.WeakSet()
+        self._objects: dict[int, object] = {}
+        self._handles_by_identity: dict[int, int] = {}
+        self._next_handle = 1
 
-    @property
-    def closed(self) -> bool:
-        return self._closed
+    def __len__(self) -> int:
+        return len(self._objects)
 
-    def matrix(
-        self,
+    def intern(self, value: object) -> int:
+        """Return the stable domain-local handle for *value*'s identity."""
+        identity = id(value)
+        if (handle := self._handles_by_identity.get(identity)) is not None:
+            if self._objects[handle] is value:
+                return handle
+            raise RuntimeError("object identity index is inconsistent")
+        if self._next_handle > _MAX_HANDLE:
+            raise OverflowError("object domain exhausted UINT64 handles")
+        handle = self._next_handle
+        self._next_handle += 1
+        self._objects[handle] = value
+        self._handles_by_identity[identity] = handle
+        return handle
+
+    def resolve(self, handle: object) -> object:
+        """Resolve a handle or raise when it does not belong to this domain."""
+        try:
+            handle = operator.index(handle)
+        except TypeError:
+            raise TypeError("object handle must be an integer") from None
+        try:
+            return self._objects[handle]
+        except KeyError:
+            raise KeyError(f"handle {handle} does not belong to this object domain") from None
+
+    def contains_handle(self, handle: object) -> bool:
+        try:
+            handle = operator.index(handle)
+        except TypeError:
+            return False
+        return handle in self._objects
+
+
+class ObjectMatrix:
+    """Object view of a native SuiteSparse UINT64 Matrix."""
+
+    __slots__ = ("domain", "_matrix", "__weakref__")
+
+    def __init__(self, domain: ObjectDomain, matrix: gb.Matrix, *, validate: bool = True):
+        _require_suitesparse()
+        if not isinstance(domain, ObjectDomain):
+            raise TypeError("domain must be an ObjectDomain")
+        if type(matrix) is not gb.Matrix:
+            raise TypeError("matrix must be a concrete graphblas.Matrix")
+        if matrix.dtype != gb.dtypes.UINT64:
+            raise TypeError("native object matrix must have UINT64 dtype")
+        self.domain = domain
+        self._matrix = matrix
+        if validate:
+            self._validate_handles()
+
+    @classmethod
+    def from_coo(
+        cls,
+        domain: ObjectDomain,
+        rows: Iterable[int],
+        columns: Iterable[int],
+        values: Iterable[object],
+        *,
         nrows: int,
         ncols: int,
-        *,
-        rows: Iterable[int] = (),
-        columns: Iterable[int] = (),
-        values: Iterable[object] = (),
-        dup: ObjectBinaryOp | Callable[[object, object], object] | None = None,
+        name: str | None = None,
     ) -> ObjectMatrix:
-        self._check_open()
-        shape = (_dimension(nrows, "nrows"), _dimension(ncols, "ncols"))
+        _require_suitesparse()
+        if not isinstance(domain, ObjectDomain):
+            raise TypeError("domain must be an ObjectDomain")
         row_list = list(rows)
         column_list = list(columns)
         value_list = list(values)
         if not (len(row_list) == len(column_list) == len(value_list)):
             raise ValueError("rows, columns, and values must have the same length")
-        data: dict[tuple[int, int], object] = {}
-        duplicate = None if dup is None else _as_binary(dup)
-        for row, column, value in zip(row_list, column_list, value_list, strict=True):
-            key = (_index(row, shape[0], "row"), _index(column, shape[1], "column"))
-            if key in data:
-                if duplicate is None:
-                    raise ValueError(f"duplicate coordinate: {key!r}")
-                value = duplicate(data[key], value)
-            data[key] = value
-        return ObjectMatrix(self, shape, data)
+        coordinates = list(zip(row_list, column_list, strict=True))
+        if len(set(coordinates)) != len(coordinates):
+            raise ValueError("duplicate coordinates are not supported")
+        handles = np.fromiter(
+            (domain.intern(value) for value in value_list),
+            dtype=np.uint64,
+            count=len(value_list),
+        )
+        native = gb.Matrix.from_coo(
+            row_list,
+            column_list,
+            handles,
+            dtype=gb.dtypes.UINT64,
+            nrows=nrows,
+            ncols=ncols,
+            name=name,
+        )
+        return cls(domain, native, validate=False)
 
-    def vector(
-        self,
-        size: int,
+    @property
+    def native(self) -> gb.Matrix:
+        return self._matrix
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return self._matrix.shape
+
+    @property
+    def nrows(self) -> int:
+        return self._matrix.nrows
+
+    @property
+    def ncols(self) -> int:
+        return self._matrix.ncols
+
+    @property
+    def nvals(self) -> int:
+        return self._matrix.nvals
+
+    @property
+    def S(self):
+        """The structural mask of the native matrix."""
+        return self._matrix.S
+
+    @property
+    def format(self) -> str:
+        return self._matrix.ss.format
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._matrix
+
+    def __getitem__(self, key: tuple[int, int]) -> object:
+        row, column = _matrix_key(key)
+        handle = self._matrix.get(row, column, _ABSENT)
+        if handle is _ABSENT:
+            raise KeyError(key)
+        return self.domain.resolve(handle)
+
+    def get(self, row: int, column: int, default: object = None) -> object:
+        handle = self._matrix.get(row, column, _ABSENT)
+        if handle is _ABSENT:
+            return default
+        return self.domain.resolve(handle)
+
+    def __setitem__(self, key: tuple[int, int], value: object) -> None:
+        row, column = _matrix_key(key)
+        self._matrix[row, column] = self.domain.intern(value)
+
+    def __delitem__(self, key: tuple[int, int]) -> None:
+        row, column = _matrix_key(key)
+        del self._matrix[row, column]
+
+    def clear(self) -> None:
+        self._matrix.clear()
+
+    def resize(self, nrows: int, ncols: int) -> None:
+        self._matrix.resize(nrows, ncols)
+
+    def dup(self, *, name: str | None = None) -> ObjectMatrix:
+        return type(self)(self.domain, self._matrix.dup(name=name), validate=False)
+
+    def to_coo(self, *, sort: bool = True) -> tuple[np.ndarray, np.ndarray, list[object]]:
+        rows, columns, handles = self._matrix.to_coo(dtype=gb.dtypes.UINT64, sort=sort)
+        return rows, columns, [self.domain.resolve(handle) for handle in handles]
+
+    def _validate_handles(self) -> None:
+        _, _, handles = self._matrix.to_coo(
+            rows=False,
+            columns=False,
+            dtype=gb.dtypes.UINT64,
+        )
+        for handle in handles:
+            self.domain.resolve(handle)
+
+
+class ObjectVector:
+    """Object view of a native SuiteSparse UINT64 Vector."""
+
+    __slots__ = ("domain", "_vector", "__weakref__")
+
+    def __init__(self, domain: ObjectDomain, vector: gb.Vector, *, validate: bool = True):
+        _require_suitesparse()
+        if not isinstance(domain, ObjectDomain):
+            raise TypeError("domain must be an ObjectDomain")
+        if type(vector) is not gb.Vector:
+            raise TypeError("vector must be a concrete graphblas.Vector")
+        if vector.dtype != gb.dtypes.UINT64:
+            raise TypeError("native object vector must have UINT64 dtype")
+        self.domain = domain
+        self._vector = vector
+        if validate:
+            self._validate_handles()
+
+    @classmethod
+    def from_coo(
+        cls,
+        domain: ObjectDomain,
+        indices: Iterable[int],
+        values: Iterable[object],
         *,
-        indices: Iterable[int] = (),
-        values: Iterable[object] = (),
-        dup: ObjectBinaryOp | Callable[[object, object], object] | None = None,
+        size: int,
+        name: str | None = None,
     ) -> ObjectVector:
-        self._check_open()
-        size = _dimension(size, "size")
+        _require_suitesparse()
+        if not isinstance(domain, ObjectDomain):
+            raise TypeError("domain must be an ObjectDomain")
         index_list = list(indices)
         value_list = list(values)
         if len(index_list) != len(value_list):
             raise ValueError("indices and values must have the same length")
-        data: dict[int, object] = {}
-        duplicate = None if dup is None else _as_binary(dup)
-        for index, value in zip(index_list, value_list, strict=True):
-            key = _index(index, size, "index")
-            if key in data:
-                if duplicate is None:
-                    raise ValueError(f"duplicate index: {key!r}")
-                value = duplicate(data[key], value)
-            data[key] = value
-        return ObjectVector(self, size, data)
-
-    def binary(
-        self, function: Callable[[object, object], object], *, name: str | None = None
-    ) -> ObjectBinaryOp:
-        self._check_open()
-        return ObjectBinaryOp(function, name=name)
-
-    def monoid(
-        self,
-        function: ObjectBinaryOp | Callable[[object, object], object],
-        identity: object,
-        *,
-        name: str | None = None,
-    ) -> ObjectMonoid:
-        self._check_open()
-        return ObjectMonoid(function, identity, name=name)
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        for container in list(self._containers):
-            container._data.clear()
-
-    def _check_open(self) -> None:
-        if self._closed:
-            raise RuntimeError("object domain is closed")
-
-    def _register(self, container: _ObjectSparse) -> None:
-        self._containers.add(container)
-
-    def __enter__(self) -> ObjectDomain:
-        self._check_open()
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.close()
-
-
-class _ObjectSparse:
-    _domain: ObjectDomain
-    _data: dict[Any, object]
-    _extent: Any
-
-    def __init__(self, domain: ObjectDomain, extent: Any, data: dict[Any, object]):
-        domain._check_open()
-        self._domain = domain
-        self._extent = extent
-        self._data = data
-        domain._register(self)
-
-    @property
-    def nvals(self) -> int:
-        self._check_open()
-        return len(self._data)
-
-    def __len__(self) -> int:
-        return self.nvals
-
-    def __contains__(self, key: object) -> bool:
-        self._check_open()
-        try:
-            normalized = self._normalize_key(key)
-        except (IndexError, TypeError):
-            return False
-        return normalized in self._data
-
-    def __getitem__(self, key: object) -> object:
-        self._check_open()
-        return self._data[self._normalize_key(key)]
-
-    def get(self, key: object, default: object = None) -> object:
-        self._check_open()
-        return self._data.get(self._normalize_key(key), default)
-
-    def __setitem__(self, key: object, value: object) -> None:
-        self._check_open()
-        self._data[self._normalize_key(key)] = value
-
-    def __delitem__(self, key: object) -> None:
-        self._check_open()
-        del self._data[self._normalize_key(key)]
-
-    def clear(self) -> None:
-        self._check_open()
-        self._data.clear()
-
-    def copy(self):
-        self._check_open()
-        return type(self)(self._domain, self._extent, self._data.copy())
-
-    def items(self) -> Iterator[tuple[Any, object]]:
-        self._check_open()
-        yield from ((key, self._data[key]) for key in sorted(self._data))
-
-    def ewise_intersect(
-        self, other: _ObjectSparse, op: ObjectBinaryOp | Callable[[object, object], object]
-    ):
-        """Apply *op* where both inputs have a stored value."""
-        self._check_compatible(other)
-        binary = _as_binary(op)
-        data = {
-            key: binary(self._data[key], other._data[key])
-            for key in sorted(self._data.keys() & other._data.keys())
-        }
-        return type(self)(self._domain, self._extent, data)
-
-    def ewise_union(
-        self, other: _ObjectSparse, op: ObjectBinaryOp | Callable[[object, object], object]
-    ):
-        """Copy lone values and apply *op* where both inputs have a value."""
-        self._check_compatible(other)
-        binary = _as_binary(op)
-        data: dict[Any, object] = {}
-        for key in sorted(self._data.keys() | other._data.keys()):
-            if key in self._data and key in other._data:
-                data[key] = binary(self._data[key], other._data[key])
-            elif key in self._data:
-                data[key] = self._data[key]
-            else:
-                data[key] = other._data[key]
-        return type(self)(self._domain, self._extent, data)
-
-    def reduce(self, monoid: ObjectMonoid) -> object:
-        """Reduce stored values in deterministic coordinate order."""
-        self._check_open()
-        if not isinstance(monoid, ObjectMonoid):
-            raise TypeError("monoid must be an ObjectMonoid")
-        result = monoid.identity
-        for key in sorted(self._data):
-            result = monoid.binary(result, self._data[key])
-        return result
-
-    def _check_open(self) -> None:
-        self._domain._check_open()
-
-    def _check_compatible(self, other: _ObjectSparse) -> None:
-        self._check_open()
-        if not isinstance(other, type(self)):
-            raise TypeError(f"expected {type(self).__name__}, got {type(other).__name__}")
-        other._check_open()
-        if self._domain is not other._domain:
-            raise ValueError("containers belong to different object domains")
-        if self._extent != other._extent:
-            raise ValueError("container dimensions do not match")
-
-    def _normalize_key(self, key: object) -> Any:
-        raise NotImplementedError
-
-
-class ObjectMatrix(_ObjectSparse):
-    def __init__(
-        self,
-        domain: ObjectDomain,
-        shape: tuple[int, int],
-        data: dict[tuple[int, int], object],
-    ):
-        super().__init__(domain, shape, data)
-
-    @property
-    def shape(self) -> tuple[int, int]:
-        return self._extent
-
-    @property
-    def nrows(self) -> int:
-        return self._extent[0]
-
-    @property
-    def ncols(self) -> int:
-        return self._extent[1]
-
-    def to_coo(self) -> tuple[list[int], list[int], list[object]]:
-        self._check_open()
-        rows: list[int] = []
-        columns: list[int] = []
-        values: list[object] = []
-        for (row, column), value in self.items():
-            rows.append(row)
-            columns.append(column)
-            values.append(value)
-        return rows, columns, values
-
-    def _normalize_key(self, key: object) -> tuple[int, int]:
-        if not isinstance(key, tuple) or len(key) != 2:
-            raise TypeError("matrix key must be a (row, column) tuple")
-        return (
-            _index(key[0], self.nrows, "row"),
-            _index(key[1], self.ncols, "column"),
+        if len(set(index_list)) != len(index_list):
+            raise ValueError("duplicate indices are not supported")
+        handles = np.fromiter(
+            (domain.intern(value) for value in value_list),
+            dtype=np.uint64,
+            count=len(value_list),
         )
+        native = gb.Vector.from_coo(
+            index_list,
+            handles,
+            dtype=gb.dtypes.UINT64,
+            size=size,
+            name=name,
+        )
+        return cls(domain, native, validate=False)
 
-
-class ObjectVector(_ObjectSparse):
-    def __init__(self, domain: ObjectDomain, size: int, data: dict[int, object]):
-        super().__init__(domain, size, data)
+    @property
+    def native(self) -> gb.Vector:
+        return self._vector
 
     @property
     def size(self) -> int:
-        return self._extent
+        return self._vector.size
 
-    def to_coo(self) -> tuple[list[int], list[object]]:
-        self._check_open()
-        indices: list[int] = []
-        values: list[object] = []
-        for index, value in self.items():
-            indices.append(index)
-            values.append(value)
-        return indices, values
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._vector.shape
 
-    def _normalize_key(self, key: object) -> int:
-        return _index(key, self.size, "index")
+    @property
+    def nvals(self) -> int:
+        return self._vector.nvals
+
+    @property
+    def S(self):
+        """The structural mask of the native vector."""
+        return self._vector.S
+
+    @property
+    def format(self) -> str:
+        return self._vector.ss.format
+
+    def __contains__(self, index: object) -> bool:
+        return index in self._vector
+
+    def __getitem__(self, index: int) -> object:
+        handle = self._vector.get(index, _ABSENT)
+        if handle is _ABSENT:
+            raise KeyError(index)
+        return self.domain.resolve(handle)
+
+    def get(self, index: int, default: object = None) -> object:
+        handle = self._vector.get(index, _ABSENT)
+        if handle is _ABSENT:
+            return default
+        return self.domain.resolve(handle)
+
+    def __setitem__(self, index: int, value: object) -> None:
+        self._vector[index] = self.domain.intern(value)
+
+    def __delitem__(self, index: int) -> None:
+        del self._vector[index]
+
+    def clear(self) -> None:
+        self._vector.clear()
+
+    def resize(self, size: int) -> None:
+        self._vector.resize(size)
+
+    def dup(self, *, name: str | None = None) -> ObjectVector:
+        return type(self)(self.domain, self._vector.dup(name=name), validate=False)
+
+    def to_coo(self, *, sort: bool = True) -> tuple[np.ndarray, list[object]]:
+        indices, handles = self._vector.to_coo(dtype=gb.dtypes.UINT64, sort=sort)
+        return indices, [self.domain.resolve(handle) for handle in handles]
+
+    def _validate_handles(self) -> None:
+        _, handles = self._vector.to_coo(indices=False, dtype=gb.dtypes.UINT64)
+        for handle in handles:
+            self.domain.resolve(handle)
 
 
-def _as_binary(
-    function: ObjectBinaryOp | Callable[[object, object], object],
-) -> ObjectBinaryOp:
-    if isinstance(function, ObjectBinaryOp):
-        return function
-    return ObjectBinaryOp(function)
+def _require_suitesparse() -> None:
+    # Accessing Matrix initializes the default backend when needed.
+    _ = gb.Matrix
+    if gb.backend != "suitesparse":
+        raise RuntimeError("the object-domain prototype requires the suitesparse backend")
 
 
-def _dimension(value: object, name: str) -> int:
-    try:
-        value = operator.index(value)
-    except TypeError:
-        raise TypeError(f"{name} must be an integer") from None
-    if value < 0:
-        raise ValueError(f"{name} must be nonnegative")
-    return value
-
-
-def _index(value: object, size: int, name: str) -> int:
-    try:
-        value = operator.index(value)
-    except TypeError:
-        raise TypeError(f"{name} must be an integer") from None
-    if value < 0 or value >= size:
-        raise IndexError(f"{name} {value} is out of bounds for size {size}")
-    return value
+def _matrix_key(key: object) -> tuple[Any, Any]:
+    if not isinstance(key, tuple) or len(key) != 2:
+        raise TypeError("matrix key must be a (row, column) tuple")
+    return key

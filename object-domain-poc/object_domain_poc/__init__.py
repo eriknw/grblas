@@ -1,9 +1,3 @@
-from .domain import ObjectBinaryOp, ObjectDomain, ObjectMatrix, ObjectMonoid, ObjectVector
+from .domain import ObjectDomain, ObjectMatrix, ObjectVector
 
-__all__ = [
-    "ObjectBinaryOp",
-    "ObjectDomain",
-    "ObjectMatrix",
-    "ObjectMonoid",
-    "ObjectVector",
-]
+__all__ = ["ObjectDomain", "ObjectMatrix", "ObjectVector"]
