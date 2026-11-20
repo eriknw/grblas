@@ -1,5 +1,12 @@
 # PyObject-backed GraphBLAS UDT: design notes
 
+> **Update (2026-11-20).** The branch `objdtype-core` builds on this plan and
+> goes past it; see `object-dtype.md`. Measurements there changed two
+> conclusions below: Python functions can run on handles inside SuiteSparse
+> kernels, including on its OpenMP threads, and a tracing collector reclaims
+> objects without compaction. The stage-one prototype (`object-domain-poc/`)
+> remains on `michelp/object-domain-stage-one`.
+
 ## Status and intent
 
 This note explores an experimental value domain whose stored value is a live
@@ -74,7 +81,7 @@ are plain scalar bytes. All dereferencing happens in Python-aware code.
 
 This is the most promising representation, but it still has a key limitation:
 GraphBLAS does not tell the domain when internal handle copies or discards occur.
-Use handles as *interned immutable object identities*, not reference-counted
+Use handles as _interned immutable object identities_, not reference-counted
 per-cell resources. The domain owns each object independently of the number of
 matrix occurrences; matrix lifetime is tracked at a coarser level.
 
