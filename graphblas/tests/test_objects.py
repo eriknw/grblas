@@ -889,3 +889,61 @@ def test_collect_loop_does_not_starve_calls():
         rounds += 1
     t.join()
     assert rounds >= 20
+
+
+@pytest.mark.parametrize("kind", ["series", "dict_values", "custom"])
+def test_from_coo_values_array_likes(kind):
+    """An array-like gives a value per index; another non-sequence iterable raises."""
+    if kind == "series":
+        pd = pytest.importorskip("pandas")
+        v = Vector.from_coo([0, 1, 2], pd.Series(["a", "b", "c"]), dtype=OBJECT)
+        assert v.to_coo()[1].tolist() == ["a", "b", "c"]
+        return
+
+    class Bag:
+        def __iter__(self):
+            return iter([1, 2, 3])
+
+        def __len__(self):
+            return 3
+
+    values = {0: 1, 1: 2, 2: 3}.values() if kind == "dict_values" else Bag()
+    with pytest.raises(TypeError, match="list"):
+        Vector.from_coo([0, 1, 2], values, dtype=OBJECT)
+
+
+@pyops
+def test_python_op_call_waits_for_a_long_call(monkeypatch):
+    """A call waits for another thread's long call while that call makes progress."""
+    import time
+
+    from graphblas.core.operator import pyobject
+
+    monkeypatch.setattr(pyobject, "wait_timeout", 0.5)
+
+    def slow(x):
+        time.sleep(0.002)  # releases the GIL, so the other thread runs meanwhile
+        return (x,)  # a new object: the Numba trampolines show progress only by claims
+
+    slow_op = unary.register_anonymous(slow, is_udt=True)
+    neg = unary.register_anonymous(lambda x: -x, is_udt=True)
+    big = Vector.from_coo(range(1000), list(range(1000)), dtype=OBJECT)  # about 2 s
+    small = Vector.from_coo([0], [1], dtype=OBJECT)
+    small.apply(neg).new()
+    started = threading.Event()
+    results = []
+
+    def long_call():
+        started.set()
+        big.apply(slow_op).new(**({"nthreads": 1} if suitesparse else {}))
+
+    t = threading.Thread(target=long_call)
+    t.start()
+    started.wait()
+    time.sleep(0.2)
+    try:
+        results.append(small.apply(neg).new().get(0))
+    except RuntimeError as exc:  # pragma: no cover (failure)
+        results.append(exc)
+    t.join()
+    assert results == [-1]

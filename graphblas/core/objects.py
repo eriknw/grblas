@@ -30,7 +30,7 @@ where they go out, :func:`track` when an OBJECT container is made, and
 import itertools
 import threading
 import weakref
-from collections.abc import Iterator, Mapping, Sequence, Set
+from collections.abc import Iterable, Sequence
 from threading import get_ident as _get_ident
 
 import numpy as np
@@ -640,9 +640,12 @@ def track(container):
 def to_handles(values, *, shape=None):
     """Return ``values`` (objects) as an array of handles with dtype ``STORAGE``.
 
-    An ndarray (of any dtype) or a sequence other than str and bytes gives one
-    handle per item; a set, dict or iterator raises TypeError; any other value is
-    one object, given as a 0-d array (``from_coo`` makes an iso container of it). The
+    An array or array-like (``__array__``) or a sequence other than str and bytes
+    gives one handle per item; any other iterable (a set, dict, iterator) raises
+    TypeError; any other value is one object, given as a 0-d array (``from_coo``
+    makes an iso container of it). So ``from_coo(..., None)`` stores None at every
+    index, while ``v[i] = None`` deletes, as for every dtype (a Scalar of None is
+    empty). The
     result is a carrier: the collector keeps its handles alive while it, or any
     view of it, exists, so the caller may store them later. An array that already
     has dtype ``STORAGE`` (from ``ss.export``) passes through.
@@ -651,15 +654,19 @@ def to_handles(values, *, shape=None):
         # Not checked: the values of a bitmap export include garbage where there is
         # no entry. A stale handle fails when it is resolved.
         return values
-    if isinstance(values, np.ndarray):
-        objects = values.astype(object).ravel()  # numbers become Python scalars
+    if isinstance(values, np.ndarray) or hasattr(values, "__array__"):
+        # An array or array-like (a pandas Series, say); numbers become Python scalars
+        values = np.asarray(values, dtype=object)
+        objects = values.ravel()
         shape = values.shape
     elif isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
         values = list(values)
         objects = np.empty(len(values), dtype=object)
         objects[:] = _as_cells(values)
         shape = (len(values),)
-    elif isinstance(values, (Set, Mapping, Iterator)):
+    elif isinstance(values, Iterable) and not isinstance(values, (str, bytes, bytearray)):
+        # A set, dict, its views, an iterator, or a custom iterable: a value per index
+        # in no sure order, or one object? Ask for a list.
         raise TypeError(
             f"OBJECT values may not be a {type(values).__name__}: use a list for a value "
             "per index, or [x] * n (or a non-container x) for one object at every index"

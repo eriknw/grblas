@@ -47,6 +47,7 @@ while a call runs Ctrl-C goes to the error slot (``_route_sigint``).
 import signal
 import sys
 import threading
+import time
 import weakref
 
 from ... import backend
@@ -60,9 +61,9 @@ _HAS_GIL = getattr(sys, "_is_gil_enabled", lambda: True)()
 # a Python op may itself run a GraphBLAS call that runs a Python op.
 _run_lock = threading.RLock()
 _run_owner = None  # thread id holding _run_lock
-# Seconds a Python-op call waits for another thread's to finish, then RuntimeError
-# (None: forever). A Python op that waits for another thread running such a call
-# would otherwise wait forever.
+# Seconds a Python-op call waits while another thread's call makes no progress
+# (``_wait_for_turn``), then RuntimeError (None: forever). A Python op that waits
+# for another thread running such a call would otherwise wait forever.
 wait_timeout = 60.0
 _error = None
 # Reentrant: Ctrl-C (``_on_sigint``) may land while this thread holds it
@@ -81,17 +82,20 @@ _ANY = (Exception, BaseExceptionGroup, GeneratorExit, KeyboardInterrupt, SystemE
 _allow_zero = False
 _run_threads = 1  # threads the running call may use (1, or None for SuiteSparse's count)
 _in_cffi = threading.local()  # depth: this thread runs a function for a cffi callback
+_cffi_progress = 0  # cffi callbacks done (``_progress``)
 
 
 def _marked(func):
     """``func``, counting in ``_in_cffi`` while it runs (``run`` checks it)."""
 
     def call(*args):
+        global _cffi_progress
         _in_cffi.depth = getattr(_in_cffi, "depth", 0) + 1
         try:
             return func(*args)
         finally:
             _in_cffi.depth -= 1
+            _cffi_progress += 1
 
     return call
 
@@ -349,6 +353,47 @@ def _desc_config(desc):
     return config
 
 
+def _progress():
+    """What changes while the running call makes progress: callbacks done, slots claimed."""
+    from . import _cshim
+
+    state = objects._heap.state
+    return (
+        _cshim.progress(),
+        _cffi_progress,
+        int(state[objects.S_TOP]),
+        int(state[objects.S_NFREE]),
+    )
+
+
+def _wait_for_turn():
+    """Take _run_lock; raise if the call holding it makes no progress for ``wait_timeout``.
+
+    Another thread's long call keeps finishing callbacks, so this waits for it. A call
+    whose Python op waits for this thread makes none: a deadlock, so this raises. The
+    Numba trampolines count no callbacks, so a long Numba call shows progress only
+    when it claims slots.
+    """
+    if _run_lock.acquire(blocking=False):
+        return
+    if wait_timeout is None:
+        _run_lock.acquire()
+        return
+    step = min(1.0, wait_timeout)
+    last, since = _progress(), time.monotonic()
+    while not _run_lock.acquire(timeout=step):
+        now, seen = time.monotonic(), _progress()
+        if seen != last:
+            last, since = seen, now
+        elif now - since >= wait_timeout:
+            raise RuntimeError(
+                f"waited {wait_timeout} s for another thread's GraphBLAS call with a Python op "
+                "on OBJECT (they run one at a time), which made no progress. A Python op that "
+                "waits for another thread running such a call never gets its turn; see "
+                "graphblas.core.operator.pyobject.wait_timeout (None waits forever)"
+            )
+
+
 def _route_sigint():
     """While a call runs, send Ctrl-C to the error slot; return the handler to restore.
 
@@ -408,13 +453,7 @@ def run(call, cfunc_name, args, kind):
             "a Python op on OBJECT cannot run a GraphBLAS call with a Python op while its "
             "own call may use several threads; use nthreads=1 for the outer call"
         )
-    if not _run_lock.acquire(timeout=-1 if wait_timeout is None else wait_timeout):
-        raise RuntimeError(
-            f"waited {wait_timeout} s for another thread's GraphBLAS call with a Python op on "
-            "OBJECT (they run one at a time). A Python op that waits for another thread "
-            "running such a call never gets its turn; for a long call, raise "
-            "graphblas.core.operator.pyobject.wait_timeout (None waits forever)"
-        )
+    _wait_for_turn()
     try:
         owner, _run_owner = _run_owner, threading.get_ident()
         # Only the suitesparse backend can ask for one thread (``_one_thread``)

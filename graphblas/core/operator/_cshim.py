@@ -41,6 +41,7 @@ typedef struct {
     uint64_t threshold;
     int errflag;
     int allow_zero;
+    uint64_t progress;
     uintptr_t add_chunks;
     uintptr_t on_error;
     uintptr_t invalid_handle;
@@ -92,6 +93,7 @@ typedef struct {
     uint64_t threshold;     /* allocations after which a collection is due */
     int errflag;            /* set by the first error in a call; reset per call */
     int allow_zero;         /* the call has an empty iso input (pyobject.run) */
+    uint64_t progress;      /* callbacks done, counted 16 at a time (pyobject.run waits on it) */
     uintptr_t add_chunks;   /* PyObject *: add_chunks(upto) */
     uintptr_t on_error;     /* PyObject *: on_error(exc) */
     uintptr_t invalid_handle;  /* PyObject *: objects.InvalidHandle */
@@ -142,6 +144,14 @@ void heap_claim(uint64_t n, int64_t *out)
 
 /* Nonzero on a thread while a trampoline runs Python on it */
 static _Thread_local int in_cb;
+
+/* Count callbacks done, so a call waiting for this one sees progress (pyobject.run).
+   A shared counter per callback would stop threads from scaling: 16 at a time. */
+static _Thread_local uint32_t cb_done;
+static void count_done(void)
+{
+    if ((++cb_done & 15) == 0) __atomic_fetch_add(&HEAP.progress, 16, __ATOMIC_RELAXED);
+}
 int in_callback(void) { return in_cb; }
 
 void heap_count(uint64_t n)
@@ -295,6 +305,7 @@ static void unary_impl(tramp_ctx *c, void *z, const void *x)
 done:
     Py_XDECREF(a);
     *(uint64_t *) z = out;
+    count_done();
     in_cb -= 1;
     PyGILState_Release(g);
 }
@@ -320,6 +331,7 @@ done:
     Py_XDECREF(args[0]);
     Py_XDECREF(args[1]);
     *(uint64_t *) z = out;
+    count_done();
     in_cb -= 1;
     PyGILState_Release(g);
 }
@@ -354,6 +366,7 @@ done:
     for (int k = 0; k < 4; k++) Py_XDECREF(args[k]);
     if (c->out_bool) *(bool *) z = truth;
     else *(uint64_t *) z = out;
+    count_done();
     in_cb -= 1;
     PyGILState_Release(g);
 }
@@ -636,6 +649,11 @@ def exit_call(saved):
     if saved is not None:
         heap = _mod.lib.HEAP
         heap.errflag, heap.allow_zero = saved
+
+
+def progress():
+    """Callbacks done so far (16 at a time), for a call waiting on another."""
+    return int(_mod.lib.HEAP.progress) if _mod else 0
 
 
 def set_error_flag():
