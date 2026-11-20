@@ -18,6 +18,7 @@ from graphblas import (
     semiring,
     unary,
 )
+from graphblas.core import _supports_udfs as supports_udfs
 from graphblas.core import objects
 
 OBJECT = dtypes.OBJECT
@@ -120,7 +121,7 @@ def test_structural(A, things):
     assert _same(v.to_coo()[1], [things[0], things[2], things[5]])
 
 
-@pytest.mark.skipif("not supports_udfs")
+@pytest.mark.skipif(not supports_udfs, reason="first, second and any on a UDT need Numba")
 def test_select_ops(A, things):
     """``first``, ``second`` and ``any`` pick objects; ``mxm`` with ``any_first`` too."""
     B = Matrix.from_coo([0, 3], [0, 0], [Thing("b0"), Thing("b1")], dtype=OBJECT, nrows=4, ncols=4)
@@ -164,7 +165,7 @@ def test_refuses_value_ops(A):
         A.apply(unary.ainv).new()
 
 
-@pytest.mark.skipif("not supports_udfs")
+@pytest.mark.skipif(not supports_udfs, reason="first, second and any on a UDT need Numba")
 def test_refuses_udf(A):
     with pytest.raises(KeyError, match="OBJECT"):
         A.apply(unary.register_anonymous(lambda x: x)).new()
@@ -184,11 +185,11 @@ def test_isequal_is_identity():
 
 
 def test_interning():
-    """Storing one object twice gives one handle, so an iso fill is one handle."""
+    """Storing one object twice gives one handle."""
     t = Thing("x")
     v = Vector.from_coo([0, 1, 2], [t, t, Thing("y")], dtype=OBJECT)
-    if (handles := v.ss.export()["values"].view(np.uint64) if suitesparse else None) is not None:
-        assert handles[0] == handles[1] != handles[2]
+    handles = objects._sorted_coo(v)[1]
+    assert handles[0] == handles[1] != handles[2]
 
 
 def test_collect_frees_unreferenced(things):
