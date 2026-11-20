@@ -93,7 +93,7 @@ typedef struct {
     uint64_t threshold;     /* allocations after which a collection is due */
     int errflag;            /* set by the first error in a call; reset per call */
     int allow_zero;         /* the call has an empty iso input (pyobject.run) */
-    uint64_t progress;      /* callbacks done, counted 16 at a time (pyobject.run waits on it) */
+    uint64_t progress;      /* callbacks done, counted 256 at a time (pyobject.run waits on it) */
     uintptr_t add_chunks;   /* PyObject *: add_chunks(upto) */
     uintptr_t on_error;     /* PyObject *: on_error(exc) */
     uintptr_t invalid_handle;  /* PyObject *: objects.InvalidHandle */
@@ -146,11 +146,12 @@ void heap_claim(uint64_t n, int64_t *out)
 static _Thread_local int in_cb;
 
 /* Count callbacks done, so a call waiting for this one sees progress (pyobject.run).
-   A shared counter per callback would stop threads from scaling: 16 at a time. */
+   A shared counter per callback would stop threads from scaling (16 at a time still
+   cost at 8 and 16 threads), so 256 at a time; slot claims show progress too. */
 static _Thread_local uint32_t cb_done;
 static void count_done(void)
 {
-    if ((++cb_done & 15) == 0) __atomic_fetch_add(&HEAP.progress, 16, __ATOMIC_RELAXED);
+    if ((++cb_done & 255) == 0) __atomic_fetch_add(&HEAP.progress, 256, __ATOMIC_RELAXED);
 }
 int in_callback(void) { return in_cb; }
 
@@ -652,7 +653,7 @@ def exit_call(saved):
 
 
 def progress():
-    """Callbacks done so far (16 at a time), for a call waiting on another."""
+    """Callbacks done so far (256 at a time), for a call waiting on another."""
     return int(_mod.lib.HEAP.progress) if _mod else 0
 
 
