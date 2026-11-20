@@ -424,3 +424,15 @@ def test_python_ops_collect(F, FA):
     objects.collect()
     assert len(freed) == 4
     assert [t.x for t in kept.to_coo()[2]] == FA.to_coo()[2].tolist()
+
+
+@pyops
+def test_python_ops_collect_during_call(monkeypatch):
+    """A collection due during a Python-op call runs after it, and keeps its results."""
+    monkeypatch.setattr(objects, "threshold", 10)
+    v = Vector.from_coo(range(200), list(range(200)), dtype=OBJECT)
+    before = objects.stats()["collections"]
+    box = unary.register_anonymous(lambda x: [x], is_udt=True)
+    w = v.apply(box).new()  # 200 allocations inside one call
+    assert objects.stats()["collections"] > before
+    assert [x[0] for x in w.to_coo()[1]] == list(range(200))
