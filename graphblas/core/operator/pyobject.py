@@ -9,7 +9,7 @@ Monoids and semirings built from such a BinaryOp then work too, so ``mxm``,
 ``reduce`` and the rest run the Python function inside SuiteSparse's kernels.
 
 The trampoline is C code (``_cshim``, about 50 ns a call) when a C compiler can
-build it, and otherwise a cffi callback (here, about 30 times slower), which
+build it, and otherwise a cffi callback (10 to 30 times slower), which
 needs neither a compiler nor Numba. With the GIL, or with a cffi callback, a
 call that runs a Python op asks SuiteSparse for one thread (``run``).
 
