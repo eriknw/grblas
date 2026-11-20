@@ -520,4 +520,172 @@ def test_python_op_inside_python_op(F, FA):
         return v.apply(neg).new().get(0)
 
     op = unary.register_anonymous(outer, is_udt=True)
-    assert FA.apply(op).new().get(2, 2) == F(-5)
+    # One thread for the outer call (without the GIL, the default is several)
+    assert FA.apply(op).new(nthreads=1).get(2, 2) == F(-5)
+
+
+# Review fixes: each test fails without its fix
+
+_FT = not getattr(__import__("sys"), "_is_gil_enabled", lambda: True)()
+
+
+@pyops
+@pytest.mark.skipif(
+    not _FT, reason="a call runs Python ops on several threads only without the GIL"
+)
+def test_nested_python_op_on_several_threads():
+    """A Python op that runs a Python-op call inside a multithreaded call raises, not hangs."""
+    neg = unary.register_anonymous(lambda x: -x, is_udt=True)
+
+    def outer(x):
+        return Vector.from_coo([0], [x], dtype=OBJECT).apply(neg).new().get(0)
+
+    op = unary.register_anonymous(outer, is_udt=True)
+    v = Vector.from_coo(range(200_000), list(range(200_000)), dtype=OBJECT)
+    result = []
+
+    def work():
+        try:
+            v.apply(op).new(nthreads=8)
+            result.append("ok")
+        except RuntimeError as exc:
+            result.append(exc)
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(60)
+    assert result, "hung"
+    assert isinstance(result[0], RuntimeError)
+
+
+@pyops
+@pytest.mark.parametrize("cshim", [True, False])
+def test_handle_zero_in_nonempty_input(cshim, monkeypatch):
+    """Handle 0 left by a failed ``<<`` raises when a Python op reads it."""
+    from graphblas.core.operator import _cshim
+
+    if not cshim:
+        monkeypatch.setattr(_cshim, "_mod", False)
+    C = Vector.from_coo([0, 1, 2], [1, 2, 3], dtype=OBJECT)
+    v = Vector.from_coo([0, 1, 2], [1, 0, 2], dtype=OBJECT)
+    with pytest.raises(ZeroDivisionError):
+        C << v.apply(unary.register_anonymous(lambda x: 1 / x, is_udt=True))
+    keep = select.register_anonymous(lambda x, i, j, t: True, is_udt=True)
+    with pytest.raises(objects.InvalidHandle):
+        C.select(keep, 0).new()
+    with pytest.raises(objects.InvalidHandle):
+        C.apply(unary.register_anonymous(lambda x: x, is_udt=True)).new()
+
+
+@pyops
+@pytest.mark.parametrize("cshim", [True, False])
+def test_python_op_entries_are_freed(cshim, monkeypatch):
+    """Dropping a Python op frees its function and what it closes over."""
+    from graphblas.core.operator import _cshim, pyobject
+
+    if not cshim:
+        monkeypatch.setattr(_cshim, "_mod", False)
+    freed = []
+    held = Thing("closed over")
+    weakref.finalize(held, freed.append, 1)
+
+    def f(x, held=held):
+        return x
+
+    op = unary.register_anonymous(f, is_udt=True)
+    Vector.from_coo([0], [1], dtype=OBJECT).apply(op).new()
+    key = id(op[OBJECT])
+    assert key in pyobject._callbacks
+    del op, f, held
+    gc.collect()
+    assert freed == [1]
+    assert key not in pyobject._callbacks
+
+
+@pyops
+@pytest.mark.parametrize("exc_type", [SystemExit, GeneratorExit])
+def test_cffi_base_exceptions(exc_type, monkeypatch):
+    """SystemExit and GeneratorExit from a function on the cffi path are raised after the call."""
+    from graphblas.core.operator import _cshim
+
+    monkeypatch.setattr(_cshim, "_mod", False)
+
+    def f(x):
+        raise exc_type
+
+    op = unary.register_anonymous(f, is_udt=True)
+    with pytest.raises(exc_type):
+        Vector.from_coo([0, 1], [1, 2], dtype=OBJECT).apply(op).new()
+
+
+@pyops
+def test_sigint_goes_to_the_error_slot():
+    """Ctrl-C during a Python-op call is raised after the call, whichever frame it lands in."""
+    import signal
+
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signals go to the main thread")
+    calls = []
+
+    def f(x):
+        calls.append(x)
+        if len(calls) == 2:
+            handler = signal.getsignal(signal.SIGINT)
+            assert handler is not signal.default_int_handler
+            handler(signal.SIGINT, None)  # as the interpreter would, at any later point
+        return x
+
+    op = unary.register_anonymous(f, is_udt=True)
+    with pytest.raises(KeyboardInterrupt):
+        Vector.from_coo(range(50), list(range(50)), dtype=OBJECT).apply(op).new()
+    assert len(calls) == 2
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_from_coo_one_object():
+    """For OBJECT, a value that is not a list, tuple or array is one object for every entry."""
+    from fractions import Fraction
+
+    v = Vector.from_coo([0, 1, 2], "abc", dtype=OBJECT)
+    assert v.to_coo()[1].tolist() == ["abc"] * 3
+    half = Fraction(1, 2)
+    A = Matrix.from_coo([0, 1], [1, 0], half, dtype=OBJECT, nrows=2, ncols=2)
+    assert all(x is half for x in A.to_coo()[2])
+    w = Vector.from_coo([0, 1], (1, 2), dtype=OBJECT)  # a tuple is a sequence, as in numpy
+    assert w.to_coo()[1].tolist() == [1, 2]
+
+
+@pyops
+@pytest.mark.skipif("not suitesparse")
+def test_one_thread_keeps_descriptor_options():
+    """With the GIL, a Python-op call with descriptor options still runs on one thread."""
+    from graphblas.core.descriptor import lookup
+    from graphblas.core.operator import pyobject
+
+    desc = lookup(axb_method="dot", mask_structure=True)
+    one = pyobject._one_thread(desc)
+    config = pyobject._desc_config(one)
+    assert config["nthreads"] == 1
+    assert config["axb_method"] == "dot"
+    assert config["mask_structure"]
+
+
+@pyops
+def test_build_with_python_dup_op():
+    """Build and from_coo take a Python dup_op."""
+    first = binary.register_anonymous(lambda x, y: x, is_udt=True)
+    a, b = Thing("a"), Thing("b")
+    v = Vector.from_coo([0, 0, 1], [a, b, b], dtype=OBJECT, dup_op=first)
+    assert v.get(0) in {a, b}
+    assert v.get(1) is b
+
+
+def test_subclass_takes_the_lock():
+    """A call on a subclass of Vector with OBJECT values holds the collector's lock."""
+
+    class MyVector(Vector):
+        __slots__ = ()
+
+    v = MyVector.from_coo([0], [Thing("x")], dtype=OBJECT)
+    assert type(v) is MyVector
+    assert objects.touches_object([v])

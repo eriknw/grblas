@@ -868,7 +868,8 @@ class Vector(BaseType):
                     "values can be identical.  Duplicate indices will be ignored."
                 )
             if backend == "suitesparse":
-                w.ss.build_scalar(indices, values.tolist())
+                value = objects.iso_value(values) if dtype._is_object else values.tolist()
+                w.ss.build_scalar(indices, value)
             else:
                 values = np.broadcast_to(values, (indices.size, *dtype.np_type.shape))
                 w.build(indices, values, dup_op=binary.any)

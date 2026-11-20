@@ -24,7 +24,6 @@ import os
 import sys
 import tempfile
 import threading
-import weakref
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +40,7 @@ typedef struct {
     uint64_t nchunks;
     uint64_t threshold;
     int errflag;
+    int allow_zero;
     uintptr_t add_chunks;
     uintptr_t on_error;
     uintptr_t invalid_handle;
@@ -91,6 +91,7 @@ typedef struct {
     uint64_t nchunks;       /* chunks published (release store after the pointers) */
     uint64_t threshold;     /* allocations after which a collection is due */
     int errflag;            /* set by the first error in a call; reset per call */
+    int allow_zero;         /* the call has an empty iso input (pyobject.run) */
     uintptr_t add_chunks;   /* PyObject *: add_chunks(upto) */
     uintptr_t on_error;     /* PyObject *: on_error(exc) */
     uintptr_t invalid_handle;  /* PyObject *: objects.InvalidHandle */
@@ -180,11 +181,13 @@ static void report_error(void)
 }
 
 /* SuiteSparse calls an op on the iso values of empty iso inputs, which may be 0
-   (never filled). The result is discarded, so such a call is skipped: no error. */
+   (never filled), and discards the result: such an element is skipped. Handle 0
+   anywhere else (left by a failed in-place call) fails in get_handle. */
 static int skip(tramp_ctx *c, const void *x, const void *y)
 {
-    return (c->kx == K_HANDLE && *(const uint64_t *) x == 0)
-        || (y != NULL && c->ky == K_HANDLE && *(const uint64_t *) y == 0);
+    return HEAP.allow_zero
+        && ((c->kx == K_HANDLE && *(const uint64_t *) x == 0)
+            || (y != NULL && c->ky == K_HANDLE && *(const uint64_t *) y == 0));
 }
 
 /* The object of a handle, as a new reference; NULL (error reported) unless live */
@@ -532,7 +535,9 @@ def _attach(mod):
     heap = objects._heap
     if heap.c is not None:
         return True
-    if not objects._lock.acquire_exclusive(blocking=True):
+    # Never wait on a worker inside a call: the call would wait for the worker. The
+    # op then uses a cffi callback.
+    if not objects._lock.acquire_exclusive(blocking=not in_callback()):
         return False  # inside a call: claims are not atomic until no call runs
     try:
         if heap.c is not None:  # another thread attached while we waited
@@ -614,16 +619,26 @@ def in_callback():
     return bool(_mod) and bool(_mod.lib.in_callback())
 
 
-def reset_error():
-    """Clear the error flag, and take up a new ``objects.threshold``, around each call."""
-    if _mod:
+def enter_call(allow_zero):
+    """Start a Python-op call: return the C error state to restore (``exit_call``)."""
+    if not _mod:
+        return None
+    heap = _mod.lib.HEAP
+    saved = (heap.errflag, heap.allow_zero)
+    heap.errflag = 0
+    heap.allow_zero = 1 if allow_zero else 0
+    heap.threshold = int(max(objects.threshold, objects.GC_FACTOR * objects._heap.live_after_gc))
+    return saved
+
+
+def exit_call(saved):
+    """End a Python-op call: put back the state of the call around it, if any."""
+    if saved is not None:
         heap = _mod.lib.HEAP
-        heap.errflag = 0
-        heap.threshold = int(
-            max(objects.threshold, objects.GC_FACTOR * objects._heap.live_after_gc)
-        )
+        heap.errflag, heap.allow_zero = saved
 
 
-def finalize_release(op, release):
-    """Free the pool entry when the typed op (and so its GrB op) is garbage."""
-    weakref.finalize(op, release)
+def set_error_flag():
+    """Stop the running call's trampolines (Ctrl-C)."""
+    if _mod:
+        _mod.lib.HEAP.errflag = 1

@@ -1079,7 +1079,8 @@ class Matrix(BaseType):
                     "values can be identical.  Duplicate indices will be ignored."
                 )
             if backend == "suitesparse":
-                C.ss.build_scalar(rows, columns, values.tolist())
+                value = objects.iso_value(values) if dtype._is_object else values.tolist()
+                C.ss.build_scalar(rows, columns, value)
             else:
                 values = np.broadcast_to(values, (rows.size, *dtype.np_type.shape))
                 C.build(rows, columns, values, dup_op=binary.any)

@@ -546,6 +546,8 @@ def touches_object(args):
     for x in args:
         kind = _arg_kinds.get(type(x))
         if kind is None:
+            kind = _arg_kinds[type(x)] = _classify(type(x))
+        if kind < 0:
             continue
         if kind == 1:  # _Pointer
             x = x.val
@@ -558,8 +560,45 @@ def touches_object(args):
     return False
 
 
-# type -> 0 (has ``dtype``), 1 (``_Pointer``) or 2 (mask), filled by ``track``
+# type -> 0 (has ``dtype``), 1 (``_Pointer``), 2 (mask) or -1 (other), filled by
+# ``track`` and, for other types (a subclass of Matrix, say), by ``_classify``
 _arg_kinds = {}
+_base_kinds = []
+
+
+def _classify(cls):
+    for base, kind in _base_kinds:
+        if issubclass(cls, base):
+            return kind
+    return -1
+
+
+def has_empty_iso(args):
+    """Whether an OBJECT Matrix or Vector among ``call``'s arguments is empty and iso.
+
+    SuiteSparse calls an op on the iso values of such inputs, which may be handle 0
+    (never filled), and drops the result (``operator.pyobject``).
+    """
+    for x in args:
+        kind = _arg_kinds.get(type(x), -1)
+        if kind == 1:
+            x = x.val
+        elif kind != 0:
+            continue
+        if getattr(x, "ndim", 0) == 0 or x.dtype is not OBJECT:
+            continue  # a Scalar, or a _CArray of values (build)
+        if getattr(x, "_is_transposed", False):
+            x = x._matrix
+        if x._nvals:
+            continue
+        if not _has_iso:
+            return True
+        is_iso = ffi.new("bool*")
+        iso = lib.GxB_Matrix_iso if x.ndim == 2 else lib.GxB_Vector_iso
+        iso(is_iso, x.gb_obj[0])
+        if is_iso[0]:
+            return True
+    return False
 
 
 def _fill_arg_kinds():
@@ -569,10 +608,12 @@ def _fill_arg_kinds():
     from .utils import _CArray, _Pointer
     from .vector import Vector
 
-    kinds = dict.fromkeys((Matrix, TransposedMatrix, Vector, Scalar, _CArray), 0)
+    containers = (Matrix, TransposedMatrix, Vector, Scalar, _CArray)
+    kinds = dict.fromkeys(containers, 0)
     kinds[_Pointer] = 1
     kinds.update((cls, 2) for cls in Mask.__subclasses__())
     _arg_kinds.update(kinds)
+    _base_kinds.extend([(Mask, 2), (_Pointer, 1), *((cls, 0) for cls in containers)])
 
 
 def track(container):
@@ -587,9 +628,11 @@ def track(container):
 def to_handles(values, *, shape=None):
     """Return ``values`` (objects) as an array of handles with dtype ``STORAGE``.
 
-    The result is a carrier: the collector keeps its handles alive while it,
-    or any view of it, exists, so the caller may store them later. An array
-    that already has dtype ``STORAGE`` (from ``ss.export``) passes through.
+    A list, tuple or ndarray gives one handle per item; any other value is one
+    object, given as a 0-d array (``from_coo`` makes an iso container of it). The
+    result is a carrier: the collector keeps its handles alive while it, or any
+    view of it, exists, so the caller may store them later. An array that already
+    has dtype ``STORAGE`` (from ``ss.export``) passes through.
     """
     if isinstance(values, np.ndarray) and values.dtype == STORAGE:
         # Not checked: the values of a bitmap export include garbage where there is
@@ -598,12 +641,15 @@ def to_handles(values, *, shape=None):
     if isinstance(values, np.ndarray) and values.dtype == object:
         objects = values.ravel()
         shape = values.shape
-    else:
-        if not isinstance(values, (list, tuple)):
-            values = list(values) if hasattr(values, "__iter__") else [values]
+    elif isinstance(values, (list, tuple)):
         objects = np.empty(len(values), dtype=object)
         objects[:] = _as_cells(values)
         shape = (len(values),)
+    else:
+        # Anything else (a str, a Fraction, a generator) is one object: an iso build
+        objects = np.empty(1, dtype=object)
+        objects[0] = values
+        shape = ()
     _maybe_collect()
     with _lock, _heap_lock:
         handles = _heap.intern(objects)
@@ -622,6 +668,11 @@ def _as_cells(values):
             cells[i] = v
         return cells
     return values
+
+
+def iso_value(values):
+    """The object a 0-d ``STORAGE`` array (from ``to_handles``) holds, for an iso build."""
+    return to_objects(values.reshape(1))[0]
 
 
 def to_objects(values):
