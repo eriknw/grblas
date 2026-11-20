@@ -417,7 +417,10 @@ class Scalar(BaseType):
             if output_type(val) is Scalar:
                 val = val.value  # raise below if wrong type (as determined by cffi)
             if self.dtype._is_udt:
-                self.gb_obj[0 : self.dtype.np_type.itemsize] = _element_bytes(self.dtype, val)
+                # Held until ``_empty`` is False: for OBJECT, ``data`` keeps the handle
+                # alive through a collection until this Scalar does (``objects.to_handles``)
+                data = _element_bytes(self.dtype, val)
+                self.gb_obj[0 : self.dtype.np_type.itemsize] = data
             else:
                 self.gb_obj[0] = val
             self._empty = False
