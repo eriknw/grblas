@@ -448,7 +448,12 @@ class Scalar(BaseType):
         if self._is_cscalar:
             return 0 if self._empty else 1
         n = ffi_new("GrB_Index*")
-        check_status(lib.GrB_Scalar_nvals(n, self.gb_obj[0]), self)
+        if self.dtype._is_object:
+            # Not during a collection (``objects._OpLock``)
+            with objects._lock:
+                check_status(lib.GrB_Scalar_nvals(n, self.gb_obj[0]), self)
+        else:
+            check_status(lib.GrB_Scalar_nvals(n, self.gb_obj[0]), self)
         return n[0]
 
     @property

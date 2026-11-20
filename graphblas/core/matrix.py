@@ -632,7 +632,12 @@ class Matrix(BaseType):
     def _nvals(self):
         """Like nvals, but doesn't record calls."""
         n = ffi_new("GrB_Index*")
-        check_status(lib.GrB_Matrix_nvals(n, self.gb_obj[0]), self)
+        if self.dtype._is_object:
+            # It finishes pending work, so not during a collection (``objects._OpLock``)
+            with objects._lock:
+                check_status(lib.GrB_Matrix_nvals(n, self.gb_obj[0]), self)
+        else:
+            check_status(lib.GrB_Matrix_nvals(n, self.gb_obj[0]), self)
         return n[0]
 
     @property

@@ -30,6 +30,8 @@ import numpy as np
 
 from . import ffi, lib
 
+_has_iso = hasattr(lib, "GxB_Matrix_iso")
+
 # The storage of an element: a record with one uint64 field. A record (not
 # UINT64) makes OBJECT a UDT, so GraphBLAS refuses its built-in numeric ops,
 # and python-graphblas's UDT machinery gives it ``first``, ``second`` and ``any``
@@ -138,6 +140,9 @@ class _OpLock:
 
 
 _lock = _OpLock()
+# Mutators hold ``_lock`` shared, so several may intern at once; this serializes
+# allocation and the identity index among them. Reentrant: a finalizer may intern.
+_heap_lock = threading.RLock()
 # Set when the first OBJECT container is made; until then ``base.call`` skips the lock
 active = False
 
@@ -275,12 +280,17 @@ class _Heap:
 _heap = _Heap()
 
 
-def _forget(table, key):
-    def callback(ref):
-        if table.get(key) is ref:
-            del table[key]
+def _register(table, obj):
+    """Add a weak reference to ``obj`` to ``table``; it removes itself when ``obj`` dies.
 
-    return callback
+    The key is the id of the weak reference, not of ``obj``: the table keeps the
+    reference alive, so its id is not reused while it is a key. Keyed by
+    ``id(obj)``, a new object at a dead one's address could be registered just
+    before the dead one's callback runs, which would then remove the new one.
+    A free-threaded stress run hit that: a container went unmarked.
+    """
+    ref = weakref.ref(obj, lambda ref: table.pop(id(ref), None))
+    table[id(ref)] = ref
 
 
 def _stored_handles(container):
@@ -311,10 +321,12 @@ def _stored_handles(container):
     is_iso = ffi.new("bool*")
     if container.ndim == 2:
         lib.GrB_Matrix_nvals(nvals, gb_obj)
-        lib.GxB_Matrix_iso(is_iso, gb_obj)
+        if _has_iso:  # not on the vanilla backend
+            lib.GxB_Matrix_iso(is_iso, gb_obj)
     else:
         lib.GrB_Vector_nvals(nvals, gb_obj)
-        lib.GxB_Vector_iso(is_iso, gb_obj)
+        if _has_iso:
+            lib.GxB_Vector_iso(is_iso, gb_obj)
     n = nvals[0]
     if n == 0:
         return None
@@ -335,8 +347,7 @@ def track(container):
     """Register a new OBJECT Matrix, Vector or Scalar, so the collector marks its values."""
     global active
     active = True
-    key = id(container)
-    _heap.containers[key] = weakref.ref(container, _forget(_heap.containers, key))
+    _register(_heap.containers, container)
 
 
 def to_handles(values, *, shape=None):
@@ -360,9 +371,12 @@ def to_handles(values, *, shape=None):
         objects[:] = _as_cells(values)
         shape = (len(values),)
     _maybe_collect()
-    with _lock:
-        handles = _heap.intern(objects).reshape(shape)
-        _heap.carriers[id(handles)] = weakref.ref(handles, _forget(_heap.carriers, id(handles)))
+    with _lock, _heap_lock:
+        handles = _heap.intern(objects)
+        # Register the array that owns the data: a view of a view has the owner as
+        # its ``base``, not the view between, so only the owner lives as long as
+        # every view of it does. ``intern`` returns a new array.
+        _register(_heap.carriers, handles)
     return handles.view(STORAGE).reshape(shape)
 
 
@@ -491,13 +505,13 @@ def _collect(blocking):
 def pin(obj):
     """Keep ``obj`` alive as a root until :func:`unpin`; return its handle."""
     handle = int(to_handles([obj]).view(np.uint64)[0])
-    with _lock:
+    with _lock, _heap_lock:
         _heap.roots[handle] = _heap.roots.get(handle, 0) + 1
     return handle
 
 
 def unpin(handle):
-    with _lock:
+    with _lock, _heap_lock:
         count = _heap.roots.pop(handle)
         if count > 1:
             _heap.roots[handle] = count - 1
@@ -531,7 +545,8 @@ def _make_dtype():
     numba_type = _numba_type(STORAGE) if _has_numba else None
     rv = DataType("OBJECT", gb_obj, None, "uint8_t[8]", numba_type, STORAGE)
     rv._is_object = True
-    for key in (gb_obj, STORAGE, "OBJECT", object, np.dtype(object), "object", "O"):
+    # ``object`` and ``np.dtype(object)`` are not keys: see ``dtypes.lookup_dtype``
+    for key in (gb_obj, STORAGE, "OBJECT"):
         _registry[key] = rv
     _set_udt_jit_c_definition(rv)
     return rv

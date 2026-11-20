@@ -556,7 +556,9 @@ def lookup_dtype(key, value=None):
         return lookup_dtype(_numba_as_dtype(key))
     if value is not None and hasattr(value, "dtype") and value.dtype in _registry:
         return _registry[value.dtype]
-    if _is_object_key(key):
+    if value is None and _is_object_key(key):
+        # Only when asked for by name: ``lookup_dtype(type(value), value)`` infers a
+        # dtype, and an arbitrary object stays an error there
         return _object_dtype()
     # np.dtype(x) accepts some weird values; we may want to guard against some
     if key is None:
