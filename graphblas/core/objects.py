@@ -14,17 +14,20 @@ generation, so a stale or forged handle fails to resolve instead
 of naming another object (until a slot is reused 2**24 times). Slot 0 is never
 used, so a zeroed value (an identity, say) never resolves either.
 
-Interning from Python is by identity: storing one object twice gives one handle
-(``_heap.by_id``). The C trampolines (``operator._cshim``) give each result a new
-handle instead, unless the result is one of the inputs. So equal handles are the
-same object, but one object may have several handles: ``isequal`` compares
-handles and resolves only the pairs that differ.
+One value (a Scalar's, say) is interned by identity: storing one object twice
+gives one handle (``_heap.by_id``). An array of values (``from_coo``) and the
+results of the C trampolines (``operator._cshim``) get a handle per occurrence,
+except that a result that is one of the inputs keeps its handle. So equal
+handles are the same object, but one object may have several handles:
+``isequal`` compares handles and resolves only the pairs that differ. A slot's
+alive mark is 2 when it is in ``_heap.by_id``, 1 otherwise.
 
 The core hooks call :func:`to_handles` where values come in, :func:`to_objects`
 where they go out, :func:`track` when an OBJECT container is made, and
 :func:`check_op` when an operator is typed for OBJECT.
 """
 
+import itertools
 import threading
 import weakref
 from threading import get_ident as _get_ident
@@ -46,10 +49,13 @@ _SLOT_MASK = np.uint64((1 << _SLOT_BITS) - 1)
 _GEN_SHIFT = np.uint64(_SLOT_BITS)
 _GEN_MAX = (1 << 24) - 1
 
-# Collect when the allocations since the last collection exceed
-# max(threshold, live handles after it), so a collection costs O(1) amortized
-# per allocation. Tests lower it.
+# Collect when the allocations since the last collection exceed this threshold,
+# so a collection costs O(1) amortized per allocation. Tests lower it.
 threshold = 100_000
+# ... or GC_FACTOR times the live handles after the last collection, so a heap
+# that holds much more than the threshold collects less often. 2 measured best on
+# the demos (walks, BFS, group-by, shortest paths): fewer sweeps of a larger heap.
+GC_FACTOR = 2
 
 # The ops that only select or copy values (or ignore them), by kind and name.
 # Positional ops never reach ``check_op``: they are typed for UINT64.
@@ -270,6 +276,25 @@ class _Heap:
             self.state[S_NLIVE] += np.uint64(n)
             self.state[S_ALLOCATED] += np.uint64(n)
 
+    @staticmethod
+    def _groups(chunk):
+        """Yield ``(chunk, index)`` for each chunk among ``chunk``; index is a slice if sorted.
+
+        The heap's own slots (claims, sweeps) come sorted, so no mask or sort is needed
+        for them; a boolean mask per chunk was most of a collection's time.
+        """
+        n = chunk.size
+        steps = np.diff(chunk)
+        order = None
+        if (steps < 0).any():
+            order = np.argsort(chunk, kind="stable")
+            chunk = chunk[order]
+            steps = np.diff(chunk)
+        bounds = [0, *(np.flatnonzero(steps) + 1).tolist(), n]
+        for start, stop in itertools.pairwise(bounds):
+            index = slice(start, stop) if order is None else order[start:stop]
+            yield int(chunk[start]), index
+
     def gather(self, arrays, slots):
         """Return ``arrays[chunk][offset]`` for each slot, as one array."""
         chunk = slots >> _CHUNK_BITS
@@ -277,9 +302,8 @@ class _Heap:
         if not slots.size or chunk.min() == chunk.max():
             return arrays[int(chunk[0]) if slots.size else 0][off]
         out = np.empty(slots.size, dtype=arrays[0].dtype)
-        for c in np.unique(chunk).tolist():
-            sel = chunk == c
-            out[sel] = arrays[c][off[sel]]
+        for c, index in self._groups(chunk):
+            out[index] = arrays[c][off[index]]
         return out
 
     def scatter(self, arrays, slots, values):
@@ -291,12 +315,11 @@ class _Heap:
         if chunk.min() == chunk.max():
             arrays[int(chunk[0])][off] = values
             return
-        values = np.broadcast_to(values, slots.shape) if np.ndim(values) == 0 else values
-        for c in np.unique(chunk).tolist():
-            sel = chunk == c
-            arrays[c][off[sel]] = values[sel]
+        scalar = np.ndim(values) == 0
+        for c, index in self._groups(chunk):
+            arrays[c][off[index]] = values if scalar else values[index]
 
-    def allocate(self, objects):
+    def allocate(self, objects, by_id=True):
         """Store each of ``objects`` (distinct, none in the heap) and return their handles."""
         n = len(objects)
         slots = self.claim(n)
@@ -304,9 +327,12 @@ class _Heap:
         gen = self.gather(self.gens, slots)
         gen[gen == 0] = 1
         self.scatter(self.gens, slots, gen)
-        self.scatter(self.alives, slots, 1)
         handles = (gen.astype(np.uint64) << _GEN_SHIFT) | slots.astype(np.uint64)
-        self.by_id.update(zip(map(id, objects), handles.tolist(), strict=True))
+        if by_id:
+            self.scatter(self.alives, slots, 2)
+            self.by_id.update(zip(map(id, objects), handles.tolist(), strict=True))
+        else:
+            self.scatter(self.alives, slots, 1)
         self._count(n)
         return handles
 
@@ -335,14 +361,14 @@ class _Heap:
         gens = self.gens[c]
         gen = gens.item(off) or 1
         gens[off] = gen
-        self.alives[c][off] = 1
+        self.alives[c][off] = 2
         handle = gen << _SLOT_BITS | slot
         self.by_id[id(obj)] = handle
         self._count(1)
         return handle
 
     def intern(self, objects):
-        """Return the handles of an object ndarray, allocating for objects not yet stored."""
+        """Return handles for an object ndarray: one value by identity, more per occurrence."""
         by_id = self.by_id
         n = objects.size
         if n == 1:
@@ -351,15 +377,10 @@ class _Heap:
             if handle is None:
                 return self.allocate(objects)
             return np.array([handle], dtype=np.uint64)
-        ids = np.fromiter(map(id, objects), dtype=np.intp, count=n)
-        uniq, first, inverse = np.unique(ids, return_index=True, return_inverse=True)
-        handles = np.fromiter(
-            (by_id.get(i, 0) for i in uniq.tolist()), dtype=np.uint64, count=uniq.size
-        )
-        missing = handles == 0
-        if missing.any():
-            handles[missing] = self.allocate(objects[first[missing]])
-        return handles[inverse]
+        # More than one: a handle per occurrence, a slice write. Interning by
+        # identity costs a dict lookup per value, about 200 ns, and the demos
+        # store many values once each (``isequal`` compares mismatched handles).
+        return self.allocate(objects, by_id=False)
 
     def slots_of(self, handles):
         """The slots of ``handles``; raise InvalidHandle unless each names a live object."""
@@ -370,12 +391,12 @@ class _Heap:
         # A slot below top may be in a chunk not made yet (``claim``)
         ok = (slots < min(self.top, len(self.objs) * _CHUNK)) & (slots != 0)
         if ok.all():
-            ok = (self.gather(self.gens, slots) == gens) & (self.gather(self.alives, slots) == 1)
+            ok = (self.gather(self.gens, slots) == gens) & (self.gather(self.alives, slots) != 0)
             if ok.all():
                 return slots
         else:
             ok[ok] = (self.gather(self.gens, slots[ok]) == gens[ok]) & (
-                self.gather(self.alives, slots[ok]) == 1
+                self.gather(self.alives, slots[ok]) != 0
             )
         raise InvalidHandle(
             f"{int((~ok).sum())} of {handles.size} values are not handles of live "
@@ -406,15 +427,19 @@ class _Heap:
         Runs with the lock held exclusively: no C code is running.
         """
         top = len(marked)
-        alive = np.concatenate(self.alives)[:top] == 1
+        marks = np.concatenate(self.alives)[:top]
+        alive = marks != 0
         slots = np.flatnonzero(alive & ~marked)
         objects = []
         if slots.size:
-            objects = self.gather(self.objs, slots).tolist()
+            objects = self.gather(self.objs, slots)
             gen = self.gather(self.gens, slots)
-            handles = ((gen.astype(np.uint64) << _GEN_SHIFT) | slots.astype(np.uint64)).tolist()
+            handles = (gen.astype(np.uint64) << _GEN_SHIFT) | slots.astype(np.uint64)
             by_id = self.by_id
-            for obj, handle in zip(objects, handles, strict=True):
+            # Only slots marked 2 were interned by identity (``by_id``); checking every
+            # slot was half a collection's time
+            sel = marks[slots] == 2
+            for obj, handle in zip(objects[sel].tolist(), handles[sel].tolist(), strict=True):
                 if by_id.get(id(obj)) == handle:
                     del by_id[id(obj)]
             self.scatter(self.objs, slots, None)
@@ -429,7 +454,8 @@ class _Heap:
         self.free[: free.size] = free
         state = self.state
         state[S_NFREE] = free.size
-        state[S_NLIVE] -= np.uint64(len(objects))
+        # C counts the slots it claims, not those it fills (``_cshim.put_obj``)
+        state[S_NLIVE] = top - 1 - free.size
         state[S_ALLOCATED] = 0
         state[S_EPOCH] += np.uint64(1)
         state[S_GC] = 0
@@ -639,7 +665,7 @@ def intern_in_call(obj):
         handle = heap.by_id.get(id(obj))
         if handle is None:
             handle = heap.allocate_one(obj)
-            if heap.allocated > max(threshold, heap.live_after_gc):
+            if heap.allocated > max(threshold, GC_FACTOR * heap.live_after_gc):
                 _lock.requested = True
     return handle
 
@@ -725,7 +751,7 @@ def _sorted_coo(x):
 
 def _maybe_collect():
     heap = _heap
-    if heap.allocated > max(threshold, heap.live_after_gc):
+    if heap.allocated > max(threshold, GC_FACTOR * heap.live_after_gc):
         _collect(blocking=False)
 
 

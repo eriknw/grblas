@@ -241,6 +241,10 @@ static uint64_t put_obj(PyObject *r)
     uint64_t epoch = __atomic_load_n(&HEAP.state[S_EPOCH], __ATOMIC_ACQUIRE);
     if (blk_epoch != epoch || blk_i >= blk_n) {
         heap_claim(BLOCK, blk);
+        /* Count a block when claimed, not each result: one shared atomic per result
+           kept threads from scaling (2.8x at 4 threads without it). The collector
+           recounts live slots from the alive arrays. */
+        heap_count(BLOCK);
         blk_i = 0;
         blk_n = BLOCK;
         blk_epoch = epoch;
@@ -269,7 +273,6 @@ static uint64_t put_obj(PyObject *r)
     uint32_t g = HEAP.gens[k][off];
     if (g == 0) HEAP.gens[k][off] = g = 1;
     __atomic_store_n(&HEAP.alives[k][off], 1, __ATOMIC_RELEASE);
-    heap_count(1);
     return ((uint64_t) g << SLOT_BITS) | slot;
 }
 
@@ -519,7 +522,9 @@ class _CHeap:
     def set_free(self, free):
         self.lib.HEAP.free = self.ffi.cast("int64_t *", free.ctypes.data)
         heap = objects._heap
-        self.lib.HEAP.threshold = max(objects.threshold, heap.live_after_gc)
+        self.lib.HEAP.threshold = int(
+            max(objects.threshold, objects.GC_FACTOR * heap.live_after_gc)
+        )
 
 
 def _attach(mod):
@@ -614,7 +619,9 @@ def reset_error():
     if _mod:
         heap = _mod.lib.HEAP
         heap.errflag = 0
-        heap.threshold = max(objects.threshold, objects._heap.live_after_gc)
+        heap.threshold = int(
+            max(objects.threshold, objects.GC_FACTOR * objects._heap.live_after_gc)
+        )
 
 
 def finalize_release(op, release):

@@ -185,11 +185,15 @@ def test_isequal_is_identity():
 
 
 def test_interning():
-    """Storing one object twice gives one handle."""
+    """One value is interned by identity; an array gets a handle per occurrence."""
     t = Thing("x")
     v = Vector.from_coo([0, 1, 2], [t, t, Thing("y")], dtype=OBJECT)
     handles = objects._sorted_coo(v)[1]
-    assert handles[0] == handles[1] != handles[2]
+    assert len(set(handles.tolist())) == 3
+    assert v.isequal(Vector.from_coo([0, 1, 2], [t, t, v.get(2)], dtype=OBJECT))
+    s1 = Scalar.from_value(t, dtype=OBJECT)
+    s2 = Scalar.from_value(t, dtype=OBJECT)
+    assert objects._stored_handles(s1)[0] == objects._stored_handles(s2)[0]
 
 
 def test_collect_frees_unreferenced(things):
