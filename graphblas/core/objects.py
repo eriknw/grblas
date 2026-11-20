@@ -8,16 +8,17 @@ operations, the live handles are exactly those stored in live OBJECT containers
 (GraphBLAS copies handles but never invents one), and the collector marks those
 and frees the rest (:func:`collect`).
 
-A handle is ``generation << 40 | slot``. ``_heap.slab[slot]`` holds the object,
-and ``_heap.gen[slot]`` the generation of the handle that may name it. Freeing a
-slot bumps its generation, so a stale or forged handle fails to resolve instead
+A handle is ``generation << 40 | slot``. The heap's slot holds the object and the
+generation of the handle that may name it (``_Heap``). Freeing a slot bumps its
+generation, so a stale or forged handle fails to resolve instead
 of naming another object (until a slot is reused 2**24 times). Slot 0 is never
 used, so a zeroed value (an identity, say) never resolves either.
 
-Interning is by identity: storing one object twice gives one handle
-(``_heap.by_id``). So two values are the same object exactly when their handles
-are equal, and GraphBLAS can compare them (``isequal``, iso values) without
-calling Python. The cost is a dict lookup per value stored.
+Interning from Python is by identity: storing one object twice gives one handle
+(``_heap.by_id``). The C trampolines (``operator._cshim``) give each result a new
+handle instead, unless the result is one of the inputs. So equal handles are the
+same object, but one object may have several handles: ``isequal`` compares
+handles and resolves only the pairs that differ.
 
 The core hooks call :func:`to_handles` where values come in, :func:`to_objects`
 where they go out, :func:`track` when an OBJECT container is made, and
@@ -131,7 +132,7 @@ class _OpLock:
         mutex.acquire()
         self._active -= 1
         idle = self._active == 0
-        run = idle and self.requested
+        run = idle and (self.requested or _heap.state[S_GC])
         notify = idle and self._waiting
         mutex.release()
         if notify:
@@ -176,81 +177,151 @@ _heap_lock = threading.RLock()
 active = False
 
 
+# The heap is a list of chunks of _CHUNK slots that never move once made, so C
+# code (``operator._cshim``) can index them while Python adds more. Each chunk has
+# an object array, a generation array and an alive array; slot ``s`` is element
+# ``s & _OFF_MASK`` of chunk ``s >> _CHUNK_BITS``.
+_CHUNK_BITS = 16
+_CHUNK = 1 << _CHUNK_BITS
+_OFF_MASK = _CHUNK - 1
+MAX_CHUNKS = 1 << 16  # 2**32 slots
+
+# Fields of ``_Heap.state``, which C code reads and updates with atomics
+S_TOP, S_NFREE, S_ALLOCATED, S_NLIVE, S_EPOCH, S_GC = range(6)
+
+
 class _Heap:
-    def __init__(self, capacity=1024):
-        self.slab = np.empty(capacity, dtype=object)
-        self.gen = np.zeros(capacity, dtype=np.uint32)
-        self.alive = np.zeros(capacity, dtype=bool)
-        self.top = 1  # next never-used slot; slot 0 is never used
-        self.free = []  # freed slots, reused before ``top``
-        self.by_id = {}  # id(object) -> handle, for every object in the slab
+    """The slots, their generations, and the counters, shared with ``operator._cshim``.
+
+    Slots are claimed (``claim``) from a stack of free slots, then from ``top``.
+    The free stack is rebuilt by each collection from the alive arrays, so a slot
+    claimed but never filled (the tail of a C thread's block) is free again then.
+    Each collection also bumps the epoch, which retires those blocks.
+    """
+
+    def __init__(self):
+        self.objs = []  # per chunk, object arrays
+        self.gens = []  # per chunk, uint32
+        self.alives = []  # per chunk, uint8 (1 while the slot holds an object)
+        self.state = np.zeros(8, dtype=np.uint64)
+        self.state[S_TOP] = 1  # slot 0 is never used
+        self.free = np.zeros(_CHUNK, dtype=np.int64)
+        self.by_id = {}  # id(object) -> a handle of it (C-made handles are not here)
         # id(weakref) -> weakref (``_register``) of each live array of fresh handles,
         # and of each OBJECT container
         self.carriers = {}
         self.containers = {}
         self.roots = {}  # handle -> count of pins
-        self.nlive = 0
-        self.allocated = 0  # since the last collection
         self.live_after_gc = 0
         self.ncollections = 0
+        self.c = None  # the C directory (``operator._cshim``), once loaded
+        self._chunk_lock = threading.RLock()
+        self.add_chunks(1)
 
-    def _grow(self, needed):
-        capacity = self.slab.size
-        while capacity < needed:
-            capacity *= 2
-        if capacity == self.slab.size:
+    @property
+    def top(self):
+        return int(self.state[S_TOP])
+
+    @property
+    def nlive(self):
+        return int(self.state[S_NLIVE])
+
+    @property
+    def allocated(self):
+        return int(self.state[S_ALLOCATED])
+
+    def add_chunks(self, upto):
+        """Make chunks until slot ``upto - 1`` exists; C publishes each new one."""
+        with self._chunk_lock:
+            while len(self.objs) * _CHUNK < upto:
+                if len(self.objs) >= MAX_CHUNKS:
+                    raise MemoryError("the OBJECT heap is full")
+                objs = np.empty(_CHUNK, dtype=object)
+                gens = np.zeros(_CHUNK, dtype=np.uint32)
+                alives = np.zeros(_CHUNK, dtype=np.uint8)
+                self.objs.append(objs)
+                self.gens.append(gens)
+                self.alives.append(alives)
+                if self.c is not None:
+                    self.c.publish(len(self.objs) - 1, objs, gens, alives)
+
+    def claim(self, n):
+        """Return ``n`` slots (int64) to fill, from the free stack first."""
+        if self.c is not None:
+            slots = self.c.claim(n)
+        else:
+            state = self.state
+            nfree = int(state[S_NFREE])
+            take = min(n, nfree)
+            slots = np.empty(n, dtype=np.int64)
+            slots[:take] = self.free[nfree - take : nfree]
+            state[S_NFREE] = nfree - take
+            top = int(state[S_TOP])
+            slots[take:] = np.arange(top, top + n - take)
+            state[S_TOP] = top + n - take
+        if n:
+            self.add_chunks(int(slots.max()) + 1)
+        return slots
+
+    def _count(self, n):
+        if self.c is not None:
+            self.c.count(n)
+        else:
+            self.state[S_NLIVE] += np.uint64(n)
+            self.state[S_ALLOCATED] += np.uint64(n)
+
+    def gather(self, arrays, slots):
+        """Return ``arrays[chunk][offset]`` for each slot, as one array."""
+        chunk = slots >> _CHUNK_BITS
+        off = slots & _OFF_MASK
+        if not slots.size or chunk.min() == chunk.max():
+            return arrays[int(chunk[0]) if slots.size else 0][off]
+        out = np.empty(slots.size, dtype=arrays[0].dtype)
+        for c in np.unique(chunk).tolist():
+            sel = chunk == c
+            out[sel] = arrays[c][off[sel]]
+        return out
+
+    def scatter(self, arrays, slots, values):
+        """Set ``arrays[chunk][offset]`` for each slot."""
+        chunk = slots >> _CHUNK_BITS
+        off = slots & _OFF_MASK
+        if not slots.size:
             return
-        for name in ("slab", "gen", "alive"):
-            old = getattr(self, name)
-            new = (
-                np.empty(capacity, dtype=old.dtype)
-                if name == "slab"
-                else np.zeros_like(old, shape=capacity)
-            )
-            new[: old.size] = old
-            setattr(self, name, new)
+        if chunk.min() == chunk.max():
+            arrays[int(chunk[0])][off] = values
+            return
+        values = np.broadcast_to(values, slots.shape) if np.ndim(values) == 0 else values
+        for c in np.unique(chunk).tolist():
+            sel = chunk == c
+            arrays[c][off[sel]] = values[sel]
 
     def allocate(self, objects):
         """Store each of ``objects`` (distinct, none in the heap) and return their handles."""
         n = len(objects)
-        nreuse = min(n, len(self.free))
-        slots = np.empty(n, dtype=np.int64)
-        if nreuse:
-            slots[:nreuse] = self.free[-nreuse:]
-            del self.free[-nreuse:]
-        if nreuse < n:
-            start = self.top
-            self.top += n - nreuse
-            self._grow(self.top)
-            slots[nreuse:] = np.arange(start, self.top)
-        self.slab[slots] = objects
-        self.alive[slots] = True
-        gen = self.gen[slots]
+        slots = self.claim(n)
+        self.scatter(self.objs, slots, objects)
+        gen = self.gather(self.gens, slots)
         gen[gen == 0] = 1
-        self.gen[slots] = gen
+        self.scatter(self.gens, slots, gen)
+        self.scatter(self.alives, slots, 1)
         handles = (gen.astype(np.uint64) << _GEN_SHIFT) | slots.astype(np.uint64)
         self.by_id.update(zip(map(id, objects), handles.tolist(), strict=True))
-        self.nlive += n
-        self.allocated += n
+        self._count(n)
         return handles
 
     def allocate_one(self, obj):
-        """``allocate`` for one object, without numpy temporaries."""
-        if self.free:
-            slot = self.free.pop()
-            gen = self.gen.item(slot)  # bumped when freed
-        else:
-            slot = self.top
-            self.top += 1
-            self._grow(self.top)
-            gen = 1
-            self.gen[slot] = 1
-        self.slab[slot] = obj
-        self.alive[slot] = True
+        """``allocate`` for one object."""
+        slot = int(self.claim(1)[0])
+        c, off = slot >> _CHUNK_BITS, slot & _OFF_MASK
+        self.objs[c][off] = obj
+        gens = self.gens[c]
+        gen = gens.item(off) or 1
+        gens[off] = gen
+        self.alives[c][off] = 1
         handle = gen << _SLOT_BITS | slot
         self.by_id[id(obj)] = handle
-        self.nlive += 1
-        self.allocated += 1
+        self._count(1)
         return handle
 
     def intern(self, objects):
@@ -277,22 +348,26 @@ class _Heap:
         """The slots of ``handles``; raise InvalidHandle unless each names a live object."""
         slots = (handles & _SLOT_MASK).astype(np.intp)
         gens = (handles >> _GEN_SHIFT).astype(np.uint32)
-        top = self.top
-        if slots.size and (
-            slots.max() >= top or not self.alive[slots].all() or (self.gen[slots] != gens).any()
-        ):
-            bad = (slots >= top) | (slots == 0)
-            ok = ~bad
-            ok[ok] = self.alive[slots[ok]] & (self.gen[slots[ok]] == gens[ok])
-            raise InvalidHandle(
-                f"{int((~ok).sum())} of {handles.size} values are not handles of live "
-                f"objects; the first is {int(handles[~ok][0]):#x}"
+        if not slots.size:
+            return slots
+        ok = (slots < self.top) & (slots != 0)
+        if ok.all():
+            ok = (self.gather(self.gens, slots) == gens) & (self.gather(self.alives, slots) == 1)
+            if ok.all():
+                return slots
+        else:
+            ok[ok] = (self.gather(self.gens, slots[ok]) == gens[ok]) & (
+                self.gather(self.alives, slots[ok]) == 1
             )
-        return slots
+        raise InvalidHandle(
+            f"{int((~ok).sum())} of {handles.size} values are not handles of live "
+            f"objects; the first is {int(handles[~ok][0]):#x}"
+        )
 
     def mark(self):
         """Return a boolean array over slots: True for each slot a live handle names."""
-        marked = np.zeros(self.top, dtype=bool)
+        top = self.top
+        marked = np.zeros(top, dtype=bool)
         for table in (self.containers, self.carriers):
             for ref in list(table.values()):
                 obj = ref()
@@ -301,29 +376,47 @@ class _Heap:
                 handles = obj if isinstance(obj, np.ndarray) else _stored_handles(obj)
                 if handles is not None and handles.size:
                     slots = (handles & _SLOT_MASK).astype(np.intp)
-                    marked[slots[slots < self.top]] = True
+                    marked[slots[slots < top]] = True
         if self.roots:
             handles = np.fromiter(self.roots, dtype=np.uint64, count=len(self.roots))
             marked[(handles & _SLOT_MASK).astype(np.intp)] = True
         return marked
 
     def sweep(self, marked):
-        """Free each allocated slot not marked; return the freed objects (to drop later)."""
-        dead = self.alive[: self.top] & ~marked
-        slots = np.flatnonzero(dead)
-        if not slots.size:
-            return []
-        objects = self.slab[slots].tolist()
-        by_id = self.by_id
-        for obj in objects:
-            del by_id[id(obj)]
-        self.slab[slots] = None
-        self.alive[slots] = False
-        gen = self.gen[slots]
-        gen = np.where(gen >= _GEN_MAX, 1, gen + 1).astype(np.uint32)
-        self.gen[slots] = gen
-        self.free.extend(slots.tolist())
-        self.nlive -= slots.size
+        """Free each filled slot not marked; return the freed objects (to drop later).
+
+        Runs with the lock held exclusively: no C code is running.
+        """
+        top = len(marked)
+        alive = np.concatenate(self.alives)[:top] == 1
+        slots = np.flatnonzero(alive & ~marked)
+        objects = []
+        if slots.size:
+            objects = self.gather(self.objs, slots).tolist()
+            gen = self.gather(self.gens, slots)
+            handles = ((gen.astype(np.uint64) << _GEN_SHIFT) | slots.astype(np.uint64)).tolist()
+            by_id = self.by_id
+            for obj, handle in zip(objects, handles, strict=True):
+                if by_id.get(id(obj)) == handle:
+                    del by_id[id(obj)]
+            self.scatter(self.objs, slots, None)
+            self.scatter(self.alives, slots, 0)
+            self.scatter(self.gens, slots, np.where(gen >= _GEN_MAX, 1, gen + 1).astype(np.uint32))
+            alive[slots] = False
+        # Every empty slot below top is free, including slots claimed and never filled
+        alive[0] = True
+        free = np.flatnonzero(~alive)
+        if free.size > self.free.size:
+            self.free = np.zeros(max(free.size, 2 * self.free.size), dtype=np.int64)
+        self.free[: free.size] = free
+        state = self.state
+        state[S_NFREE] = free.size
+        state[S_NLIVE] -= np.uint64(len(objects))
+        state[S_ALLOCATED] = 0
+        state[S_EPOCH] += np.uint64(1)
+        state[S_GC] = 0
+        if self.c is not None:
+            self.c.set_free(self.free)
         return objects
 
 
@@ -487,21 +580,26 @@ def to_objects(values):
     with _lock:
         heap = _heap
         slots = heap.slots_of(handles.ravel())
-        return heap.slab.take(slots).reshape(handles.shape)
+        return heap.gather(heap.objs, slots).reshape(handles.shape)
 
 
 def resolve_in_call(handle):
     """Return the object of one handle (an int), in a call that holds the lock shared.
 
-    The trampolines of ``operator.pyobject`` use it: no collection runs during
-    the call, so this takes no lock. A freed slot's generation has moved on, and
-    a never-used slot's is 0, which no handle has, so the generation alone
-    tells whether the slot is live. ``item`` is a few times faster than indexing.
+    The cffi trampolines of ``operator.pyobject`` use it: no collection runs
+    during the call, so this takes no lock. ``item`` is a few times faster than
+    indexing.
     """
     heap = _heap
     slot = handle & 0xFFFFFFFFFF
-    if slot < heap.top and heap.gen.item(slot) == handle >> 40 and slot:
-        return heap.slab.item(slot)
+    c, off = slot >> _CHUNK_BITS, slot & _OFF_MASK
+    if (
+        slot
+        and slot < heap.top
+        and heap.gens[c].item(off) == handle >> _SLOT_BITS
+        and heap.alives[c].item(off)
+    ):
+        return heap.objs[c].item(off)
     raise InvalidHandle(f"{handle:#x} is not the handle of a live object")
 
 
@@ -561,8 +659,8 @@ def check_op(op, *dtypes, typed_cls=None):
 def isequal(left, right):
     """Whether ``left`` and ``right`` hold the same objects (by identity) at the same indices.
 
-    Interning is by identity, so equal handles are the same object, and this
-    compares handles without resolving them.
+    Equal handles are the same object, so only pairs of different handles are
+    resolved and compared with ``is``.
     """
     if left.ndim == 0 and type(right) is not type(left):
         # A Scalar compares with an object; None means empty, as for other dtypes
@@ -573,9 +671,14 @@ def isequal(left, right):
         return left._is_empty == right._is_empty and left.value is right.value
     left_indices, left_handles = _sorted_coo(left)
     right_indices, right_handles = _sorted_coo(right)
-    return all(
-        np.array_equal(x, y) for x, y in zip(left_indices, right_indices, strict=True)
-    ) and np.array_equal(left_handles, right_handles)
+    if not all(np.array_equal(x, y) for x, y in zip(left_indices, right_indices, strict=True)):
+        return False
+    differ = left_handles != right_handles
+    if not differ.any():
+        return True
+    a = to_objects(left_handles[differ].view(STORAGE))
+    b = to_objects(right_handles[differ].view(STORAGE))
+    return all(x is y for x, y in zip(a.tolist(), b.tolist(), strict=True))
 
 
 def _sorted_coo(x):
@@ -619,7 +722,6 @@ def _collect(blocking):
         _lock.requested = False
         heap = _heap
         freed = heap.sweep(heap.mark())
-        heap.allocated = 0
         heap.live_after_gc = heap.nlive
         heap.ncollections += 1
     finally:
@@ -650,9 +752,9 @@ def stats():
     heap = _heap
     return {
         "live": heap.nlive,
-        "capacity": heap.slab.size,
+        "capacity": len(heap.objs) * _CHUNK,
         "top": heap.top,
-        "free": len(heap.free),
+        "free": int(heap.state[S_NFREE]),
         "containers": len(heap.containers),
         "carriers": len(heap.carriers),
         "allocated_since_gc": heap.allocated,
