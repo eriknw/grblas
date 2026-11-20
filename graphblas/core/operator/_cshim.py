@@ -65,6 +65,7 @@ extern void *indexunary_fn[@NPOOL@];
 void heap_publish(uint64_t k, void *objs, uint32_t *gens, uint8_t *alives);
 void heap_claim(uint64_t n, int64_t *out);
 void heap_count(uint64_t n);
+int in_callback(void);
 """.replace("@NPOOL@", str(NPOOL))
 
 _SOURCE = r"""
@@ -138,6 +139,10 @@ void heap_claim(uint64_t n, int64_t *out)
     }
 }
 
+/* Nonzero on a thread while a trampoline runs Python on it */
+static _Thread_local int in_cb;
+int in_callback(void) { return in_cb; }
+
 void heap_count(uint64_t n)
 {
     __atomic_fetch_add(&HEAP.state[S_NLIVE], n, __ATOMIC_RELAXED);
@@ -163,6 +168,9 @@ static void report_error(void)
 {
     PyObject *exc = PyErr_GetRaisedException();
     __atomic_store_n(&HEAP.errflag, 1, __ATOMIC_RELAXED);
+    if (exc == NULL) {  /* a failure with no exception set must still fail the call */
+        exc = PyObject_CallFunction(PyExc_RuntimeError, "s", "a Python op on OBJECT failed");
+    }
     if (exc != NULL) {
         PyObject *r = PyObject_Vectorcall((PyObject *) HEAP.on_error, &exc, 1, NULL);
         Py_XDECREF(r);
@@ -268,6 +276,7 @@ static uint64_t put_obj(PyObject *r)
 static void unary_impl(tramp_ctx *c, void *z, const void *x)
 {
     PyGILState_STATE g = ensure_gil();
+    in_cb += 1;
     uint64_t out = 0;
     PyObject *a = NULL;
     if (__atomic_load_n(&HEAP.errflag, __ATOMIC_RELAXED) || skip(c, x, NULL)) goto done;
@@ -280,12 +289,14 @@ static void unary_impl(tramp_ctx *c, void *z, const void *x)
 done:
     Py_XDECREF(a);
     *(uint64_t *) z = out;
+    in_cb -= 1;
     PyGILState_Release(g);
 }
 
 static void binary_impl(tramp_ctx *c, void *z, const void *x, const void *y)
 {
     PyGILState_STATE g = ensure_gil();
+    in_cb += 1;
     uint64_t out = 0;
     PyObject *args[2] = {NULL, NULL};
     if (__atomic_load_n(&HEAP.errflag, __ATOMIC_RELAXED) || skip(c, x, y)) goto done;
@@ -303,6 +314,7 @@ done:
     Py_XDECREF(args[0]);
     Py_XDECREF(args[1]);
     *(uint64_t *) z = out;
+    in_cb -= 1;
     PyGILState_Release(g);
 }
 
@@ -310,6 +322,7 @@ static void indexunary_impl(tramp_ctx *c, void *z, const void *x, uint64_t i, ui
                             const void *y)
 {
     PyGILState_STATE g = ensure_gil();
+    in_cb += 1;
     uint64_t out = 0;
     int truth = 0;
     PyObject *args[4] = {NULL, NULL, NULL, NULL};
@@ -335,6 +348,7 @@ done:
     for (int k = 0; k < 4; k++) Py_XDECREF(args[k]);
     if (c->out_bool) *(bool *) z = truth;
     else *(uint64_t *) z = out;
+    in_cb -= 1;
     PyGILState_Release(g);
 }
 
@@ -516,6 +530,8 @@ def _attach(mod):
     if not objects._lock.acquire_exclusive(blocking=True):
         return False  # inside a call: claims are not atomic until no call runs
     try:
+        if heap.c is not None:  # another thread attached while we waited
+            return True
         lib, ffi = mod.lib, mod.ffi
         c = _CHeap(mod)
         lib.HEAP.state = ffi.cast("uint64_t *", heap.state.ctypes.data)
@@ -586,6 +602,11 @@ def make(kind, func, dtype, dtype2, out_bool):
             _free[arity].append(k)
 
     return fnptr, release
+
+
+def in_callback():
+    """Whether this thread is running a Python op for a C trampoline."""
+    return bool(_mod) and bool(_mod.lib.in_callback())
 
 
 def reset_error():

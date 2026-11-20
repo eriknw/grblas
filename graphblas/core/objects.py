@@ -367,7 +367,8 @@ class _Heap:
         gens = (handles >> _GEN_SHIFT).astype(np.uint32)
         if not slots.size:
             return slots
-        ok = (slots < self.top) & (slots != 0)
+        # A slot below top may be in a chunk not made yet (``claim``)
+        ok = (slots < min(self.top, len(self.objs) * _CHUNK)) & (slots != 0)
         if ok.all():
             ok = (self.gather(self.gens, slots) == gens) & (self.gather(self.alives, slots) == 1)
             if ok.all():
@@ -618,7 +619,7 @@ def resolve_in_call(handle):
     c, off = slot >> _CHUNK_BITS, slot & _OFF_MASK
     if (
         slot
-        and slot < heap.top
+        and c < len(heap.gens)
         and heap.gens[c].item(off) == handle >> _SLOT_BITS
         and heap.alives[c].item(off)
     ):

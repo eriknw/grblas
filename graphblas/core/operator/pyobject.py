@@ -43,6 +43,7 @@ _HAS_GIL = getattr(sys, "_is_gil_enabled", lambda: True)()
 # Python-op calls run one at a time, so one error slot serves them. Reentrant:
 # a Python op may itself run a GraphBLAS call that runs a Python op.
 _run_lock = threading.RLock()
+_run_owner = None  # thread id holding _run_lock
 _error = None
 _error_lock = threading.Lock()
 
@@ -281,7 +282,7 @@ def run(call, cfunc_name, args, kind):
     Holds the collector's lock shared, so a collection asked for by the many
     allocations of a call waits until the call returns (``objects._OpLock``).
     """
-    global _error
+    global _error, _run_owner
     from ..descriptor import Descriptor
     from . import _cshim
 
@@ -292,7 +293,14 @@ def run(call, cfunc_name, args, kind):
         and (args[-1] is None or isinstance(args[-1], Descriptor))
     ):
         args = [*args[:-1], _one_thread(args[-1])]
+    if _cshim.in_callback() and _run_owner != threading.get_ident():
+        # An OpenMP worker running a Python op: the call that runs it holds _run_lock
+        raise RuntimeError(
+            "a Python op on OBJECT cannot run a GraphBLAS call with a Python op on another "
+            "thread of its call; use nthreads=1 for the outer call"
+        )
     with _run_lock:
+        owner, _run_owner = _run_owner, threading.get_ident()
         outer, _error = _error, None
         _cshim.reset_error()
         objects._lock.acquire_shared()
@@ -301,6 +309,7 @@ def run(call, cfunc_name, args, kind):
         finally:
             objects._lock.release_shared()
             error, _error = _error, outer
+            _run_owner = owner
             _cshim.reset_error()
     if error is not None:
         raise error

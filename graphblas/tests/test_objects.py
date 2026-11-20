@@ -504,3 +504,16 @@ def test_empty_iso_value_is_kept():
     second = binary.register_anonymous(lambda x, y: y, is_udt=True)
     if A.ss.is_iso:
         assert A.ewise_add(A, second).new().nvals == 0
+
+
+@pyops
+def test_python_op_inside_python_op(F, FA):
+    """A Python op may run a GraphBLAS call with a Python op on its own thread."""
+    neg = unary.register_anonymous(lambda x: -x, is_udt=True)
+
+    def outer(x):
+        v = Vector.from_coo([0], [x], dtype=OBJECT)
+        return v.apply(neg).new().get(0)
+
+    op = unary.register_anonymous(outer, is_udt=True)
+    assert FA.apply(op).new().get(2, 2) == F(-5)
