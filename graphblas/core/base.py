@@ -28,8 +28,8 @@ def _is_recording():
 
 def call(cfunc_name, args):
     if objects.active and objects.touches_object(args):
-        if pyobject._callbacks and pyobject.uses_python_op(args):
-            return pyobject.run(_call, cfunc_name, args)
+        if pyobject._callbacks and (kind := pyobject.python_op_kind(args)) is not None:
+            return pyobject.run(_call, cfunc_name, args, kind)
         # No collection while GraphBLAS uses an OBJECT container: see ``objects._OpLock``
         objects._lock.acquire_shared()
         try:

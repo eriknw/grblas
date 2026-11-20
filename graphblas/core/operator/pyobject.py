@@ -38,6 +38,7 @@ _HAS_GIL = getattr(sys, "_is_gil_enabled", lambda: True)()
 # a Python op may itself run a GraphBLAS call that runs a Python op.
 _run_lock = threading.RLock()
 _error = None
+_error_lock = threading.Lock()
 
 # id of each typed op that calls Python -> its cffi callback (kept alive here)
 _callbacks = {}
@@ -155,47 +156,75 @@ def compile_op(parent, dtype, dtype2, typed_cls):
     """Make, cache and return the typed op that calls ``parent.orig_func`` on OBJECT values.
 
     Called from an op class's ``_compile_udt`` when an input is OBJECT and the
-    op is a user's function. Its result is OBJECT, or BOOL for a SelectOp.
+    op is a user's function. Its result is OBJECT, or BOOL for a SelectOp. The
+    op's C function is a C trampoline (``_cshim``) when one can be built, else a
+    cffi callback.
     """
     from ..dtypes import _object_dtype
+    from . import _cshim
 
     kind = typed_cls.opclass
     ret_type = BOOL if kind == "SelectOp" else _object_dtype()
-    body = _make_body(kind, parent.orig_func, dtype, dtype2, ret_type)
-    callback = ffi.callback(_SIGNATURES[kind], body)
+    func = parent.orig_func
+    if (made := _cshim.make(kind, func, dtype, dtype2, ret_type is BOOL)) is not None:
+        fnptr, release = made
+        entry = ("c", func)
+    else:
+        body = _make_body(kind, func, dtype, dtype2, ret_type)
+        fnptr = ffi.callback(_SIGNATURES[kind], body)
+        release = None
+        entry = ("cffi", fnptr)
     c_typename = {"SelectOp": "GrB_IndexUnaryOp"}.get(kind, f"GrB_{kind}")
     gb_obj = ffi.new(f"{c_typename}*")
     new_func = getattr(lib, f"{c_typename}_new")
     label = c_typename.removeprefix("GrB_")
     if kind == "UnaryOp":
-        status = new_func(gb_obj, callback, ret_type._carg, dtype._carg)
+        status = new_func(gb_obj, fnptr, ret_type._carg, dtype._carg)
         op = typed_cls(parent, parent.name, dtype, ret_type, gb_obj[0])
         key = dtype
     else:
-        status = new_func(gb_obj, callback, ret_type._carg, dtype._carg, dtype2._carg)
+        status = new_func(gb_obj, fnptr, ret_type._carg, dtype._carg, dtype2._carg)
         op = typed_cls(parent, parent.name, dtype, ret_type, gb_obj[0], dtype2=dtype2)
         key = (dtype, dtype2)
     check_status_carg(status, label, gb_obj[0])
-    _callbacks[id(op)] = callback
+    _callbacks[id(op)] = entry
+    if release is not None:
+        _cshim.finalize_release(op, release)
     parent._udt_types[key] = ret_type
     parent._udt_ops[key] = op
     return op
 
 
-def uses_python_op(args):
-    """Whether a typed op in ``call``'s arguments (or in a monoid or semiring) calls Python."""
+def _set_error(exc):
+    """Keep the first exception of the running call (C trampolines report here)."""
+    global _error
+    with _error_lock:
+        if _error is None:
+            _error = exc
+
+
+def python_op_kind(args):
+    """``"cffi"`` or ``"c"`` if a typed op in ``call``'s arguments (or in a monoid or
+    semiring) calls Python, through a cffi callback or a C trampoline; else None.
+    """
+    kind = None
     for x in args:
-        if id(x) in _callbacks:
-            return True
         opclass = getattr(x, "opclass", None)
+        if opclass is None:
+            continue
         if opclass == "Monoid":
-            if id(x.binaryop) in _callbacks:
-                return True
-        elif opclass == "Semiring" and (
-            id(x.binaryop) in _callbacks or id(x.monoid.binaryop) in _callbacks
-        ):
-            return True
-    return False
+            ops = (x.binaryop,)
+        elif opclass == "Semiring":
+            ops = (x.binaryop, x.monoid.binaryop)
+        else:
+            ops = (x,)
+        for op in ops:
+            entry = _callbacks.get(id(op))
+            if entry is not None:
+                if entry[0] == "cffi":
+                    return "cffi"
+                kind = "c"
+    return kind
 
 
 def _one_thread(desc):
@@ -220,26 +249,38 @@ def _one_thread(desc):
     )
 
 
-def run(call, cfunc_name, args):
+def run(call, cfunc_name, args, kind):
     """Run a GraphBLAS call whose op calls Python; raise the first error it hit.
+
+    ``kind`` is from ``python_op_kind``. A cffi callback takes the GIL per call
+    and does not scale, and with the GIL no trampoline does, so those calls ask
+    SuiteSparse for one thread. A C trampoline on a free-threaded build uses
+    SuiteSparse's thread count.
 
     Holds the collector's lock shared, so a collection asked for by the many
     allocations of a call waits until the call returns (``objects._OpLock``).
     """
     global _error
     from ..descriptor import Descriptor
+    from . import _cshim
 
-    if backend == "suitesparse" and args and (args[-1] is None or isinstance(args[-1], Descriptor)):
-        # cffi callbacks serialize on the GIL (and run no faster without it)
+    if (
+        (kind == "cffi" or _HAS_GIL)
+        and backend == "suitesparse"
+        and args
+        and (args[-1] is None or isinstance(args[-1], Descriptor))
+    ):
         args = [*args[:-1], _one_thread(args[-1])]
     with _run_lock:
         outer, _error = _error, None
+        _cshim.reset_error()
         objects._lock.acquire_shared()
         try:
             rv = call(cfunc_name, args)
         finally:
             objects._lock.release_shared()
             error, _error = _error, outer
+            _cshim.reset_error()
     if error is not None:
         raise error
     return rv
