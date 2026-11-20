@@ -2,7 +2,8 @@
 
 Scripts that show and test Python objects stored in GraphBLAS containers (`dtype=object`).
 Each one says in its docstring what it checks, how to run it, and what output means success;
-`--help` prints that. The defaults finish in a few seconds.
+`--help` prints that. The defaults finish in a few seconds. The design, and the results these
+scripts back, are in [`../object-dtype.md`](../object-dtype.md).
 
 ## Running
 
