@@ -448,10 +448,11 @@ def test_python_ops_collect_during_call(monkeypatch):
 
 @pyops
 def test_python_ops_cffi_fallback(F, FA, monkeypatch):
-    """Without the C module, Python ops run as cffi callbacks, with the same results."""
-    from graphblas.core.operator import _cshim, pyobject
+    """Without the C module or Numba, Python ops run as cffi callbacks, with the same results."""
+    from graphblas.core.operator import _cshim, _numba_capi, pyobject
 
     monkeypatch.setattr(_cshim, "_mod", False)
+    monkeypatch.setattr(_numba_capi, "_impl", False)
     add = binary.register_anonymous(lambda x, y: x + y, is_udt=True)
     C = FA.ewise_add(FA.T, add).new()
     assert pyobject._callbacks[id(add[OBJECT])][0] == "cffi"
@@ -462,19 +463,59 @@ def test_python_ops_cffi_fallback(F, FA, monkeypatch):
 
 
 @pyops
-def test_python_ops_c_pool_reuse(FA):
-    """A C trampoline is reused once its op is garbage, so making ops in a loop does not run out."""
-    from graphblas.core.operator import _cshim, pyobject
+@pytest.mark.parametrize("module", ["_cshim", "_numba_capi"])
+def test_python_ops_c_pool_reuse(FA, module):
+    """A trampoline is reused once its op is garbage, so making ops in a loop does not run out."""
+    from graphblas.core.operator import _cshim, _numba_capi, pyobject
 
-    if _cshim.load() is None:
+    if module == "_cshim" and _cshim.load() is None:
         pytest.skip("no C compiler")
-    for i in range(_cshim.NPOOL + 10):
+    if module == "_numba_capi" and (_cshim.load() is not None or not _numba_capi.load()):
+        pytest.skip("Numba trampolines are used only without a C compiler, with Numba")
+    mod = _cshim if module == "_cshim" else _numba_capi
+    for i in range(mod.NPOOL + 10):
         op = unary.register_anonymous(lambda x, i=i: (x, i), is_udt=True)
         assert pyobject._callbacks[id(op[OBJECT])][0] == "c"
         assert FA.apply(op).new().get(2, 2)[1] == i
         del op
         if i % 100 == 0:
             gc.collect()  # an op and its typed ops form a cycle
+
+
+@pyops
+def test_python_ops_numba_capi(F, FA):
+    """Without a C compiler, Python ops run in Numba-compiled trampolines that call the C API."""
+    from graphblas.core.operator import _cshim, _numba_capi
+
+    if _cshim.load() is not None or not _numba_capi.load():
+        pytest.skip("Numba trampolines are used only without a C compiler, with Numba")
+    add = binary.register_anonymous(lambda x, y: x + y, is_udt=True)
+    C = FA.ewise_add(FA.T, add).new()
+    assert any(f is add.orig_func for f in _numba_capi._funcs.values())
+    assert C.get(0, 0) == F(1)
+    for value, dtype in [
+        (1.5, "FP64"),
+        (0.5, "FP32"),
+        (True, "BOOL"),
+        (255, "UINT8"),
+        (-3, "INT8"),
+    ]:
+        right = Scalar.from_value(value, dtype=dtype)  # each built-in input type
+        assert FA.apply(add, right=right).new().get(2, 2) == F(5) + value
+    bad = binary.register_anonymous(lambda x, y: 1 / 0, is_udt=True)
+    with pytest.raises(ZeroDivisionError):
+        FA.ewise_mult(FA, bad).new()
+    # A stale handle (imported after its object was freed) fails in the trampoline
+    v = Vector.from_coo([0, 1], [Thing(0), Thing(1)], dtype=OBJECT)
+    stale = v.ss.export(raw=True)["values"].copy()
+    del v
+    objects.collect()
+    w = Vector.from_coo([0, 1], [Thing(2), Thing(3)], dtype=OBJECT)
+    parts = w.ss.export(raw=True)
+    parts["values"] = stale
+    same = unary.register_anonymous(lambda x: x, is_udt=True)
+    with pytest.raises(objects.InvalidHandle):
+        Vector.ss.import_any(**parts).apply(same).new()
 
 
 @pyops
@@ -571,10 +612,11 @@ def test_nested_python_op_on_several_threads():
 @pytest.mark.parametrize("cshim", [True, False])
 def test_handle_zero_in_nonempty_input(cshim, monkeypatch):
     """Handle 0 left by a failed ``<<`` raises when a Python op reads it."""
-    from graphblas.core.operator import _cshim
+    from graphblas.core.operator import _cshim, _numba_capi
 
     if not cshim:
         monkeypatch.setattr(_cshim, "_mod", False)
+        monkeypatch.setattr(_numba_capi, "_impl", False)
     C = Vector.from_coo([0, 1, 2], [1, 2, 3], dtype=OBJECT)
     v = Vector.from_coo([0, 1, 2], [1, 0, 2], dtype=OBJECT)
     with pytest.raises(ZeroDivisionError):
@@ -590,10 +632,11 @@ def test_handle_zero_in_nonempty_input(cshim, monkeypatch):
 @pytest.mark.parametrize("cshim", [True, False])
 def test_python_op_entries_are_freed(cshim, monkeypatch):
     """Dropping a Python op frees its function and what it closes over."""
-    from graphblas.core.operator import _cshim, pyobject
+    from graphblas.core.operator import _cshim, _numba_capi, pyobject
 
     if not cshim:
         monkeypatch.setattr(_cshim, "_mod", False)
+        monkeypatch.setattr(_numba_capi, "_impl", False)
     freed = []
     held = Thing("closed over")
     weakref.finalize(held, freed.append, 1)
@@ -615,9 +658,10 @@ def test_python_op_entries_are_freed(cshim, monkeypatch):
 @pytest.mark.parametrize("exc_type", [SystemExit, GeneratorExit])
 def test_cffi_base_exceptions(exc_type, monkeypatch):
     """SystemExit and GeneratorExit from a function on the cffi path are raised after the call."""
-    from graphblas.core.operator import _cshim
+    from graphblas.core.operator import _cshim, _numba_capi
 
     monkeypatch.setattr(_cshim, "_mod", False)
+    monkeypatch.setattr(_numba_capi, "_impl", False)
 
     def f(x):
         raise exc_type

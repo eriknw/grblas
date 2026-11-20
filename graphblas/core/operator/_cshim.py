@@ -534,14 +534,14 @@ def _attach(mod):
     """Make the C code share the heap; False if a call is running (try again later)."""
     heap = objects._heap
     if heap.c is not None:
-        return True
+        return isinstance(heap.c, _CHeap)  # not if _numba_capi has the heap
     # Never wait on a worker inside a call: the call would wait for the worker. The
     # op then uses a cffi callback.
     if not objects._lock.acquire_exclusive(blocking=not in_callback()):
         return False  # inside a call: claims are not atomic until no call runs
     try:
         if heap.c is not None:  # another thread attached while we waited
-            return True
+            return isinstance(heap.c, _CHeap)
         lib, ffi = mod.lib, mod.ffi
         c = _CHeap(mod)
         lib.HEAP.state = ffi.cast("uint64_t *", heap.state.ctypes.data)

@@ -9,8 +9,9 @@ Monoids and semirings built from such a BinaryOp then work too, so ``mxm``,
 ``reduce`` and the rest run the Python function inside SuiteSparse's kernels.
 
 The trampoline is C code (``_cshim``, about 50 ns a call) when a C compiler can
-build it, and otherwise a cffi callback (10 to 30 times slower), which
-needs neither a compiler nor Numba. With the GIL, or with a cffi callback, a
+build it; otherwise Numba-compiled code that calls the C API (``_numba_capi``,
+about as fast) when Numba is installed; otherwise a cffi callback (10 to 30
+times slower), which needs neither a compiler nor Numba. With the GIL, or with a cffi callback, a
 call that runs a Python op asks SuiteSparse for one thread (``run``).
 
 A result that ``is`` one of the inputs reuses that input's handle, so ``min``
@@ -215,15 +216,18 @@ def compile_op(parent, dtype, dtype2, typed_cls):
     Called from an op class's ``_compile_udt`` when an input is OBJECT and the
     op is a user's function. Its result is OBJECT, or BOOL for a SelectOp. The
     op's C function is a C trampoline (``_cshim``) when one can be built, else a
-    cffi callback.
+    Numba trampoline (``_numba_capi``) when Numba is installed, else a cffi callback.
     """
     from ..dtypes import _object_dtype
-    from . import _cshim
+    from . import _cshim, _numba_capi
 
     kind = typed_cls.opclass
     ret_type = BOOL if kind == "SelectOp" else _object_dtype()
     func = parent.orig_func
-    if (made := _cshim.make(kind, func, dtype, dtype2, ret_type is BOOL)) is not None:
+    out_bool = ret_type is BOOL
+    if (made := _cshim.make(kind, func, dtype, dtype2, out_bool)) is not None or (
+        made := _numba_capi.make(kind, func, dtype, dtype2, out_bool)
+    ) is not None:
         fnptr, release = made
         entry = ("c", func)
     else:
@@ -351,10 +355,11 @@ def _route_sigint():
 
 
 def _on_sigint(signum, frame):
-    from . import _cshim
+    from . import _cshim, _numba_capi
 
     _set_error(KeyboardInterrupt())
     _cshim.set_error_flag()
+    _numba_capi.set_error_flag()
 
 
 def run(call, cfunc_name, args, kind):
@@ -370,7 +375,7 @@ def run(call, cfunc_name, args, kind):
     """
     global _error, _run_owner, _allow_zero, _run_threads
     from ..descriptor import Descriptor
-    from . import _cshim
+    from . import _cshim, _numba_capi
 
     one = kind == "cffi" or _HAS_GIL
     if (
@@ -386,7 +391,7 @@ def run(call, cfunc_name, args, kind):
     # thread's call just waits for its turn.
     if (_run_owner == threading.get_ident() and _run_threads != 1) or (
         _run_owner != threading.get_ident()
-        and (_cshim.in_callback() or getattr(_in_cffi, "depth", 0))
+        and (_cshim.in_callback() or _numba_capi.in_callback() or getattr(_in_cffi, "depth", 0))
     ):
         raise RuntimeError(
             "a Python op on OBJECT cannot run a GraphBLAS call with a Python op while its "
@@ -400,7 +405,7 @@ def run(call, cfunc_name, args, kind):
         outer, _error = _error, None
         # args[0] is the output: an empty one passes no values to the op
         allow_zero, _allow_zero = _allow_zero, objects.has_empty_iso(args[1:])
-        saved = _cshim.enter_call(_allow_zero)
+        saved = (_cshim.enter_call(_allow_zero), _numba_capi.enter_call(_allow_zero))
         sigint = _route_sigint()
         objects._lock.acquire_shared()
         try:
@@ -411,7 +416,8 @@ def run(call, cfunc_name, args, kind):
                 signal.signal(signal.SIGINT, sigint)
             error, _error = _error, outer
             _run_owner, _run_threads, _allow_zero = owner, threads, allow_zero
-            _cshim.exit_call(saved)
+            _cshim.exit_call(saved[0])
+            _numba_capi.exit_call(saved[1])
     if error is not None:
         raise error
     return rv
