@@ -238,14 +238,15 @@ class _Heap:
         """``allocate`` for one object, without numpy temporaries."""
         if self.free:
             slot = self.free.pop()
+            gen = self.gen.item(slot)  # bumped when freed
         else:
             slot = self.top
             self.top += 1
             self._grow(self.top)
+            gen = 1
+            self.gen[slot] = 1
         self.slab[slot] = obj
         self.alive[slot] = True
-        gen = int(self.gen[slot]) or 1
-        self.gen[slot] = gen
         handle = gen << _SLOT_BITS | slot
         self.by_id[id(obj)] = handle
         self.nlive += 1
@@ -493,12 +494,14 @@ def resolve_in_call(handle):
     """Return the object of one handle (an int), in a call that holds the lock shared.
 
     The trampolines of ``operator.pyobject`` use it: no collection runs during
-    the call, so this takes no lock.
+    the call, so this takes no lock. A freed slot's generation has moved on, and
+    a never-used slot's is 0, which no handle has, so the generation alone
+    tells whether the slot is live. ``item`` is a few times faster than indexing.
     """
     heap = _heap
     slot = handle & 0xFFFFFFFFFF
-    if 0 < slot < heap.top and heap.alive[slot] and heap.gen[slot] == handle >> 40:
-        return heap.slab[slot]
+    if slot < heap.top and heap.gen.item(slot) == handle >> 40 and slot:
+        return heap.slab.item(slot)
     raise InvalidHandle(f"{handle:#x} is not the handle of a live object")
 
 
