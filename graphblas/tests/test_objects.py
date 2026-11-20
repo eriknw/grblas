@@ -300,3 +300,125 @@ def test_export_import(A):
     """An export holds handles; importing them while the objects live gives the objects."""
     B = Matrix.ss.import_any(**A.ss.export())
     assert B.isequal(A)
+
+
+# Python functions on OBJECT values, run inside GraphBLAS (``operator.pyobject``)
+
+pyops = pytest.mark.skipif(not supports_udfs, reason="registering a UDF needs Numba")
+
+
+@pytest.fixture
+def F():
+    from fractions import Fraction
+
+    return Fraction
+
+
+@pytest.fixture
+def FA(F):
+    return Matrix.from_coo(
+        [0, 0, 1, 2],
+        [0, 1, 1, 2],
+        [F(1, 2), F(1, 3), F(2, 3), F(5)],
+        dtype=OBJECT,
+        nrows=3,
+        ncols=3,
+    )
+
+
+@pyops
+def test_python_ops_elementwise(F, FA):
+    """apply, ewise_add, ewise_mult and ewise_union call the function on the objects."""
+    add = binary.register_anonymous(lambda x, y: x + y, is_udt=True)
+    neg = unary.register_anonymous(lambda x: -x, is_udt=True)
+    assert FA.apply(neg).new().to_coo()[2].tolist() == [F(-1, 2), F(-1, 3), F(-2, 3), F(-5)]
+    assert FA.apply(add, right=F(1)).new().get(2, 2) == F(6)
+    assert FA.apply(add, right=10).new().get(2, 2) == F(15)  # a number stays a number
+    C = FA.ewise_add(FA.T, add).new()
+    assert C.dtype is OBJECT
+    assert C.get(0, 0) == F(1)
+    assert C.get(1, 0) == F(1, 3)  # one input only: copied, not added
+    assert FA.ewise_mult(FA, add).new().get(1, 1) == F(4, 3)
+    C = FA.ewise_union(FA.T, add, F(100), F(1000)).new()
+    assert C.get(0, 1) == F(3001, 3)
+    # A UDF registered without is_udt also works on OBJECT
+    plain = binary.register_anonymous(lambda x, y: x * y)
+    assert FA.ewise_mult(FA, plain).new().get(2, 2) == F(25)
+
+
+@pyops
+def test_python_ops_reduce_mxm(F, FA):
+    """Monoids and semirings made of Python functions reduce and multiply."""
+    add = binary.register_anonymous(lambda x, y: x + y, is_udt=True)
+    mul = binary.register_anonymous(lambda x, y: x * y, is_udt=True)
+
+    def least(x, y):
+        return min(x, y)
+
+    least = binary.register_anonymous(least, is_udt=True)
+    plus = monoid.register_anonymous(add, F(0))
+    assert FA.reduce_rowwise(plus).new().to_coo()[1].tolist() == [F(5, 6), F(2, 3), F(5)]
+    assert FA.reduce_scalar(plus).new().value == F(13, 2)
+    smallest = monoid.register_anonymous(least, F(10**9))
+    s = FA.reduce_scalar(smallest).new().value
+    assert s == F(1, 3)
+    assert s is FA.get(0, 1)  # the input's handle is reused: the same object
+    plus_times = semiring.register_anonymous(plus, mul)
+    v = Vector.from_coo([0, 1, 2], [F(1), F(2), F(3)], dtype=OBJECT)
+    assert FA.mxv(v, plus_times).new().to_coo()[1].tolist() == [F(7, 6), F(4, 3), F(15)]
+    assert FA.mxm(FA, plus_times).new().get(0, 1) == F(7, 18)
+
+
+@pyops
+def test_python_ops_select(F, FA):
+    """A SelectOp on OBJECT gives BOOL; an IndexUnaryOp gives OBJECT."""
+    big = select.register_anonymous(lambda x, i, j, t: x > t, is_udt=True)
+    assert FA.select(big, F(1, 2)).new().to_coo()[2].tolist() == [F(2, 3), F(5)]
+    assert FA.select(big, 1).new().nvals == 1
+    where = gb.indexunary.register_anonymous(lambda x, i, j, t: (i, j, x), is_udt=True)
+    assert FA.apply(where, 0).new().get(1, 1) == (1, 1, F(2, 3))
+
+
+@pyops
+def test_python_ops_errors(F, FA):
+    """The first exception in a Python op is raised after GraphBLAS returns."""
+    bad = binary.register_anonymous(lambda x, y: x / (y - y), is_udt=True)
+    with pytest.raises(ZeroDivisionError):
+        FA.ewise_mult(FA, bad).new()
+    add = binary.register_anonymous(lambda x, y: x + y, is_udt=True)
+    assert FA.ewise_mult(FA, add).new().nvals == 4  # the next call is clean
+    calls = []
+
+    def count(x, y):
+        calls.append(1)
+        raise ValueError("once")
+
+    once = binary.register_anonymous(count, is_udt=True)
+    with pytest.raises(ValueError, match="once"):
+        FA.ewise_mult(FA, once).new()
+    assert len(calls) == 1  # later elements do not call the function
+
+
+@pyops
+def test_python_ops_collect(F, FA):
+    """Objects a Python op makes survive while stored, and intermediates are freed."""
+    freed = []
+
+    class Tracked:
+        def __init__(self, x):
+            self.x = x
+            weakref.finalize(self, freed.append, x)
+
+    wrap = unary.register_anonymous(lambda x: Tracked(x), is_udt=True)  # noqa: PLW0108
+    unwrap = unary.register_anonymous(lambda t: t.x, is_udt=True)
+    tmp = FA.apply(wrap).new()
+    result = tmp.apply(unwrap).new()
+    del tmp
+    gc.collect()
+    objects.collect()
+    assert len(freed) == 4  # the Tracked intermediates
+    assert result.isequal(FA)  # unwrap returns the stored Fractions, the same objects
+    kept = FA.apply(wrap).new()
+    objects.collect()
+    assert len(freed) == 4
+    assert [t.x for t in kept.to_coo()[2]] == FA.to_coo()[2].tolist()
