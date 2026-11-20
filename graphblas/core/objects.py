@@ -8,15 +8,16 @@ operations, the live handles are exactly those stored in live OBJECT containers
 (GraphBLAS copies handles but never invents one), and the collector marks those
 and frees the rest (:func:`collect`).
 
-A handle is ``generation << 40 | slot``. ``_slab[slot]`` holds the object, and
-``_gen[slot]`` the generation of the handle that may name it. Freeing a slot
-bumps its generation, so a stale or forged handle fails to resolve instead of
-naming another object. Slot 0 is never used, so a zeroed value (an identity,
-say) never resolves either.
+A handle is ``generation << 40 | slot``. ``_heap.slab[slot]`` holds the object,
+and ``_heap.gen[slot]`` the generation of the handle that may name it. Freeing a
+slot bumps its generation, so a stale or forged handle fails to resolve instead
+of naming another object (until a slot is reused 2**24 times). Slot 0 is never
+used, so a zeroed value (an identity, say) never resolves either.
 
-Interning is by identity: storing one object twice gives one handle (``_by_id``).
-So two values are the same object exactly when their handles are equal, and
-GraphBLAS can compare them (``isequal``, iso values) without calling Python.
+Interning is by identity: storing one object twice gives one handle
+(``_heap.by_id``). So two values are the same object exactly when their handles
+are equal, and GraphBLAS can compare them (``isequal``, iso values) without
+calling Python. The cost is a dict lookup per value stored.
 
 The core hooks call :func:`to_handles` where values come in, :func:`to_objects`
 where they go out, :func:`track` when an OBJECT container is made, and
@@ -25,6 +26,7 @@ where they go out, :func:`track` when an OBJECT container is made, and
 
 import threading
 import weakref
+from threading import get_ident as _get_ident
 
 import numpy as np
 
@@ -71,9 +73,13 @@ class _OpLock:
        GraphBLAS finishes pending work when the collector extracts values, and
        that must not race with a call on the same object.
     2. Every handle not stored in a tracked container is held by a tracked
-       carrier (the array :func:`to_handles` returns) or is inside a running
-       GraphBLAS call (a callback's result). The first kind is marked; the
-       second is why invariant 1 waits for calls to finish.
+       carrier (the array :func:`to_handles` returns, or a view of it) or is
+       inside a running GraphBLAS call (a callback's result). The first kind is
+       marked; the second is why invariant 1 waits for calls to finish. Code
+       that stores a carrier's handles keeps the carrier until the container
+       shows them (``Scalar.value`` keeps it until ``_empty`` is False).
+       Direct ``lib`` calls on an OBJECT container that may finish pending
+       work take the lock too (``_nvals``).
     3. Shared holding is reentrant per thread: a callback inside a call interns.
     4. A thread never waits for the lock exclusively while any thread holds it
        shared. An automatic collection requested then is deferred, and the last
@@ -85,33 +91,51 @@ class _OpLock:
     """
 
     def __init__(self):
-        self._cond = threading.Condition(threading.Lock())
+        self._mutex = threading.Lock()
+        self._cond = threading.Condition(self._mutex)
         self._active = 0  # threads holding the lock shared
         self._owner = None  # thread holding it exclusively
+        self._waiting = 0  # threads waiting for it exclusively
         self._local = threading.local()
         self.requested = False
+
+    # Every GraphBLAS call takes the lock shared once OBJECT is in use, so the shared
+    # paths use the mutex directly and touch the condition only when a thread waits.
 
     def acquire_shared(self):
         local = self._local
         depth = getattr(local, "depth", 0)
-        if depth or self._owner == threading.get_ident():
+        if depth or self._owner == _get_ident():
             local.depth = depth + 1
             return
-        with self._cond:
-            while self._owner is not None:
-                self._cond.wait()
+        mutex = self._mutex
+        mutex.acquire()
+        if self._owner is None:
             self._active += 1
+            mutex.release()
+        else:
+            mutex.release()
+            with self._cond:
+                while self._owner is not None:
+                    self._cond.wait()
+                self._active += 1
         local.depth = 1
 
     def release_shared(self):
         local = self._local
         local.depth -= 1
-        if local.depth or self._owner == threading.get_ident():
+        if local.depth or self._owner == _get_ident():
             return
-        with self._cond:
-            self._active -= 1
-            run = self._active == 0 and self.requested
-            self._cond.notify_all()
+        mutex = self._mutex
+        mutex.acquire()
+        self._active -= 1
+        idle = self._active == 0
+        run = idle and self.requested
+        notify = idle and self._waiting
+        mutex.release()
+        if notify:
+            with self._cond:
+                self._cond.notify_all()
         if run:
             _collect(blocking=False)
 
@@ -123,8 +147,12 @@ class _OpLock:
             while self._active or self._owner is not None:
                 if not blocking:
                     return False
-                self._cond.wait()
-            self._owner = threading.get_ident()
+                self._waiting += 1
+                try:
+                    self._cond.wait()
+                finally:
+                    self._waiting -= 1
+            self._owner = _get_ident()
         return True
 
     def release_exclusive(self):
@@ -155,8 +183,10 @@ class _Heap:
         self.top = 1  # next never-used slot; slot 0 is never used
         self.free = []  # freed slots, reused before ``top``
         self.by_id = {}  # id(object) -> handle, for every object in the slab
-        self.carriers = {}  # id(array) -> weakref of each live array of fresh handles
-        self.containers = {}  # id(container) -> weakref of each OBJECT container
+        # id(weakref) -> weakref (``_register``) of each live array of fresh handles,
+        # and of each OBJECT container
+        self.carriers = {}
+        self.containers = {}
         self.roots = {}  # handle -> count of pins
         self.nlive = 0
         self.allocated = 0  # since the last collection
@@ -353,9 +383,9 @@ def track(container):
 def to_handles(values, *, shape=None):
     """Return ``values`` (objects) as an array of handles with dtype ``STORAGE``.
 
-    The result is a carrier: the collector keeps its handles alive while it
-    exists, so the caller may store them later. An array that already has
-    dtype ``STORAGE`` (from ``ss.export``) is checked and passed through.
+    The result is a carrier: the collector keeps its handles alive while it,
+    or any view of it, exists, so the caller may store them later. An array
+    that already has dtype ``STORAGE`` (from ``ss.export``) passes through.
     """
     if isinstance(values, np.ndarray) and values.dtype == STORAGE:
         # Not checked: the values of a bitmap export include garbage where there is
