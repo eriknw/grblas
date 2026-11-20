@@ -472,7 +472,13 @@ def _stored_handles(container):
             lib.GxB_Vector_iso(is_iso, gb_obj)
     n = nvals[0]
     if n == 0:
-        return None
+        if not is_iso[0]:
+            return None
+        # SuiteSparse calls an op on the iso values of two iso inputs even when they
+        # have no entries (an iso 1x0 Matrix, say), so the iso value of an empty
+        # container is live too. Only an export reads it.
+        values = container.ss.export(raw=True)["values"]
+        return values.view(np.uint64)[:1].copy() if values.size else None
     out = np.empty(n, dtype=np.uint64)
     count = ffi.new("GrB_Index*", n)
     buf = ffi.from_buffer("void*", out)

@@ -492,3 +492,15 @@ def test_python_ops_any_callable(F, FA):
     if supports_udfs:
         with pytest.raises(TypeError, match="must be a function"):
             binary.register_anonymous(operator.add)  # Numba needs a Python function
+
+
+@pyops
+@pytest.mark.skipif("not suitesparse")
+def test_empty_iso_value_is_kept():
+    """A collection keeps the iso value of an empty iso Matrix: SuiteSparse calls ops on it."""
+    A = Matrix(OBJECT, 1, 0)
+    A[:, :] = Thing("iso")
+    objects.collect()
+    second = binary.register_anonymous(lambda x, y: y, is_udt=True)
+    if A.ss.is_iso:
+        assert A.ewise_add(A, second).new().nvals == 0
