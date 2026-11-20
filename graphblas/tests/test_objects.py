@@ -520,6 +520,10 @@ def test_python_op_inside_python_op(F, FA):
         return v.apply(neg).new().get(0)
 
     op = unary.register_anonymous(outer, is_udt=True)
+    if not suitesparse:  # it cannot ask for one thread there
+        with pytest.raises(RuntimeError, match="several threads"):
+            FA.apply(op).new()
+        return
     # One thread for the outer call (without the GIL, the default is several)
     assert FA.apply(op).new(nthreads=1).get(2, 2) == F(-5)
 
@@ -542,6 +546,11 @@ def test_nested_python_op_on_several_threads():
 
     op = unary.register_anonymous(outer, is_udt=True)
     v = Vector.from_coo(range(200_000), list(range(200_000)), dtype=OBJECT)
+    v[:1].new().apply(op).new(nthreads=1)  # type the op
+    from graphblas.core.operator import pyobject
+
+    if pyobject._callbacks[id(op[OBJECT])][0] == "cffi":
+        pytest.skip("a cffi call always runs on one thread")
     result = []
 
     def work():

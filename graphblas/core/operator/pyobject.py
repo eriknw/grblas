@@ -374,9 +374,12 @@ def run(call, cfunc_name, args, kind):
         )
     with _run_lock:
         owner, _run_owner = _run_owner, threading.get_ident()
-        threads, _run_threads = _run_threads, 1 if one or _asks_one_thread(args) else None
+        # Only the suitesparse backend can ask for one thread (``_one_thread``)
+        single = backend == "suitesparse" and (one or _asks_one_thread(args))
+        threads, _run_threads = _run_threads, 1 if single else None
         outer, _error = _error, None
-        allow_zero, _allow_zero = _allow_zero, objects.has_empty_iso(args)
+        # args[0] is the output: an empty one passes no values to the op
+        allow_zero, _allow_zero = _allow_zero, objects.has_empty_iso(args[1:])
         saved = _cshim.enter_call(_allow_zero)
         sigint = _route_sigint()
         objects._lock.acquire_shared()
