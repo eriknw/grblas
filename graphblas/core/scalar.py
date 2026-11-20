@@ -416,11 +416,16 @@ class Scalar(BaseType):
         elif self._is_cscalar:
             if output_type(val) is Scalar:
                 val = val.value  # raise below if wrong type (as determined by cffi)
-            if self.dtype._is_udt:
-                # Held until ``_empty`` is False: for OBJECT, ``data`` keeps the handle
-                # alive through a collection until this Scalar does (``objects.to_handles``)
+            if self.dtype._is_object:
+                # ``data`` keeps the handle alive through a collection until this Scalar
+                # does (``objects.to_handles``). The lock orders the two writes before a
+                # collection in another thread reads them (``objects._OpLock``).
                 data = _element_bytes(self.dtype, val)
-                self.gb_obj[0 : self.dtype.np_type.itemsize] = data
+                with objects._lock:
+                    self.gb_obj[0 : self.dtype.np_type.itemsize] = data
+                    self._empty = False
+            elif self.dtype._is_udt:
+                self.gb_obj[0 : self.dtype.np_type.itemsize] = _element_bytes(self.dtype, val)
             else:
                 self.gb_obj[0] = val
             self._empty = False
