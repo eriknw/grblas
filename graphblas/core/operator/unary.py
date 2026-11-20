@@ -177,6 +177,8 @@ class UnaryOp(OpBase):
             raise TypeError(f"UDF argument must be a function, not {type(func)}")
         if name is None:
             name = getattr(func, "__name__", "<anonymous_unary>")
+        if is_udt and not _has_numba:  # for OBJECT only; see ``OpBase._check_supports_udf``
+            return cls(name, func, anonymous=anonymous, is_udt=True, numba_func=None)
         success = False
         # Set on the Dispatcher too, not only on the cfunc wrapper; see the note in
         # ``BinaryOp._build``.
@@ -330,7 +332,7 @@ class UnaryOp(OpBase):
         UnaryOp or ParameterizedUnaryOp
 
         """
-        cls._check_supports_udf("register_anonymous")
+        cls._check_supports_udf("register_anonymous", is_udt)
         if parameterized:
             return ParameterizedUnaryOp(name, func, anonymous=True, is_udt=is_udt)
         return cls._build(name, func, anonymous=True, is_udt=is_udt)
@@ -377,7 +379,7 @@ class UnaryOp(OpBase):
         [..., 'plus_one', ...]
 
         """
-        cls._check_supports_udf("register_new")
+        cls._check_supports_udf("register_new", is_udt)
         module, funcname = cls._remove_nesting(name)
         if lazy:
             module._delayed[funcname] = (

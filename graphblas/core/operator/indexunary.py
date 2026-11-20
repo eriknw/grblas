@@ -116,6 +116,8 @@ class IndexUnaryOp(OpBase):
             raise TypeError(f"UDF argument must be a function, not {type(func)}")
         if name is None:
             name = getattr(func, "__name__", "<anonymous_binary>")
+        if is_udt and not _has_numba:  # for OBJECT only; see ``OpBase._check_supports_udf``
+            return cls(name, func, anonymous=anonymous, is_udt=True, numba_func=None)
         success = False
         # Set on the Dispatcher too, not only on the cfunc wrapper; see the note in
         # ``BinaryOp._build``.
@@ -271,7 +273,7 @@ class IndexUnaryOp(OpBase):
         return IndexUnaryOp or ParameterizedIndexUnaryOp
 
         """
-        cls._check_supports_udf("register_anonymous")
+        cls._check_supports_udf("register_anonymous", is_udt)
         if parameterized:
             return ParameterizedIndexUnaryOp(name, func, anonymous=True, is_udt=is_udt)
         return cls._build(name, func, anonymous=True, is_udt=is_udt)
@@ -329,7 +331,7 @@ class IndexUnaryOp(OpBase):
         [..., 'row_mod', ...]
 
         """
-        cls._check_supports_udf("register_new")
+        cls._check_supports_udf("register_new", is_udt)
         module, funcname = cls._remove_nesting(name)
         if lazy:
             module._delayed[funcname] = (

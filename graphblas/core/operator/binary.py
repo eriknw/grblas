@@ -574,6 +574,8 @@ class BinaryOp(OpBase):
             raise TypeError(f"UDF argument must be a function, not {type(func)}")
         if name is None:
             name = getattr(func, "__name__", "<anonymous_binary>")
+        if is_udt and not _has_numba:
+            return cls(name, func, anonymous=anonymous, is_udt=True, numba_func=None)
         success = False
         # The error model has to be set here, not only on the cfunc wrapper below.
         # ``.compile(sig)`` further down builds the specialization the wrapper then
@@ -816,7 +818,7 @@ class BinaryOp(OpBase):
         BinaryOp or ParameterizedBinaryOp
 
         """
-        cls._check_supports_udf("register_anonymous")
+        cls._check_supports_udf("register_anonymous", is_udt)
         if parameterized:
             return ParameterizedBinaryOp(name, func, anonymous=True, is_udt=is_udt)
         return cls._build(name, func, anonymous=True, is_udt=is_udt)
@@ -886,7 +888,7 @@ class BinaryOp(OpBase):
         >>> gb.binary.register_new("user_isclose", user_isclose, parameterized=True)
 
         """
-        cls._check_supports_udf("register_new")
+        cls._check_supports_udf("register_new", is_udt)
         module, funcname = cls._remove_nesting(name)
         if lazy:
             module._delayed[funcname] = (

@@ -572,8 +572,10 @@ class OpBase:
         return (type(self)._deserialize_udf, (self.name, self.orig_func, self._is_udt))
 
     @classmethod
-    def _check_supports_udf(cls, method_name):
-        if not _supports_udfs:
+    def _check_supports_udf(cls, method_name, is_udt=False):
+        # Without Numba, a UDF registered with is_udt=True still runs on OBJECT values,
+        # in Python (``operator.pyobject``)
+        if not _supports_udfs and not is_udt:
             raise RuntimeError(
                 f"{cls.__name__}.{method_name}(...) unavailable; install numba for UDF support"
             )

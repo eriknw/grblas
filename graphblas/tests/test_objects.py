@@ -306,7 +306,10 @@ def test_export_import(A):
 
 # Python functions on OBJECT values, run inside GraphBLAS (``operator.pyobject``)
 
-pyops = pytest.mark.skipif(not supports_udfs, reason="registering a UDF needs Numba")
+# A UDF registered with is_udt=True needs no Numba to run on OBJECT values
+pyops = pytest.mark.skipif(
+    not suitesparse and not supports_udfs, reason="OBJECT needs Numba on the vanilla backend"
+)
 
 
 @pytest.fixture
@@ -343,9 +346,10 @@ def test_python_ops_elementwise(F, FA):
     assert FA.ewise_mult(FA, add).new().get(1, 1) == F(4, 3)
     C = FA.ewise_union(FA.T, add, F(100), F(1000)).new()
     assert C.get(0, 1) == F(3001, 3)
-    # A UDF registered without is_udt also works on OBJECT
-    plain = binary.register_anonymous(lambda x, y: x * y)
-    assert FA.ewise_mult(FA, plain).new().get(2, 2) == F(25)
+    if supports_udfs:
+        # A UDF registered without is_udt (Numba types it for numbers) also works on OBJECT
+        plain = binary.register_anonymous(lambda x, y: x * y)
+        assert FA.ewise_mult(FA, plain).new().get(2, 2) == F(25)
 
 
 @pyops

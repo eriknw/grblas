@@ -330,7 +330,7 @@ class SelectOp(OpBase):
         SelectOp or ParameterizedSelectOp
 
         """
-        cls._check_supports_udf("register_anonymous")
+        cls._check_supports_udf("register_anonymous", is_udt)
         if parameterized:
             return ParameterizedSelectOp(name, func, anonymous=True, is_udt=is_udt)
         iop = IndexUnaryOp._build(name, func, anonymous=True, is_udt=is_udt)
@@ -389,7 +389,7 @@ class SelectOp(OpBase):
         [..., 'upper_left_triangle', ...]
 
         """
-        cls._check_supports_udf("register_new")
+        cls._check_supports_udf("register_new", is_udt)
         iop = IndexUnaryOp.register_new(
             name, func, parameterized=parameterized, is_udt=is_udt, lazy=lazy
         )
