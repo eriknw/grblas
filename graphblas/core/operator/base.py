@@ -327,11 +327,18 @@ def _python_op_for_object(op, dtype, dtype2=None):
     from .monoid import Monoid
     from .semiring import Semiring
 
-    if getattr(op, "orig_func", None) is None and not isinstance(op, (Monoid, Semiring)):
-        return None
-    if op._udt_types is None:
-        op._udt_types = {}
-        op._udt_ops = {}
+    if isinstance(op, Semiring):
+        parts = [op, op.monoid, op.monoid.binaryop, op.binaryop]
+    elif isinstance(op, Monoid):
+        parts = [op, op.binaryop]
+    else:
+        parts = [op]
+    if getattr(parts[-1], "orig_func", None) is None:
+        return None  # a built-in op: it would read handles as numbers
+    for part in parts:
+        if part._udt_types is None:
+            part._udt_types = {}
+            part._udt_ops = {}
     return op._compile_udt(dtype, dtype if dtype2 is None else dtype2)
 
 
