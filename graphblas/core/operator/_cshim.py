@@ -576,8 +576,11 @@ def make(kind, func, dtype, dtype2, out_bool):
 
 
 def reset_error():
+    """Clear the error flag, and take up a new ``objects.threshold``, around each call."""
     if _mod:
-        _mod.lib.HEAP.errflag = 0
+        heap = _mod.lib.HEAP
+        heap.errflag = 0
+        heap.threshold = max(objects.threshold, objects._heap.live_after_gc)
 
 
 def finalize_release(op, release):

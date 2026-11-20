@@ -440,3 +440,34 @@ def test_python_ops_collect_during_call(monkeypatch):
     w = v.apply(box).new()  # 200 allocations inside one call
     assert objects.stats()["collections"] > before
     assert [x[0] for x in w.to_coo()[1]] == list(range(200))
+
+
+@pyops
+def test_python_ops_cffi_fallback(F, FA, monkeypatch):
+    """Without the C module, Python ops run as cffi callbacks, with the same results."""
+    from graphblas.core.operator import _cshim, pyobject
+
+    monkeypatch.setattr(_cshim, "_mod", False)
+    add = binary.register_anonymous(lambda x, y: x + y, is_udt=True)
+    C = FA.ewise_add(FA.T, add).new()
+    assert pyobject._callbacks[id(add[OBJECT])][0] == "cffi"
+    assert C.get(0, 0) == F(1)
+    bad = binary.register_anonymous(lambda x, y: 1 / 0, is_udt=True)
+    with pytest.raises(ZeroDivisionError):
+        FA.ewise_mult(FA, bad).new()
+
+
+@pyops
+def test_python_ops_c_pool_reuse(FA):
+    """A C trampoline is reused once its op is garbage, so making ops in a loop does not run out."""
+    from graphblas.core.operator import _cshim, pyobject
+
+    if _cshim.load() is None:
+        pytest.skip("no C compiler")
+    for i in range(_cshim.NPOOL + 10):
+        op = unary.register_anonymous(lambda x, i=i: (x, i), is_udt=True)
+        assert pyobject._callbacks[id(op[OBJECT])][0] == "c"
+        assert FA.apply(op).new().get(2, 2)[1] == i
+        del op
+        if i % 100 == 0:
+            gc.collect()  # an op and its typed ops form a cycle
