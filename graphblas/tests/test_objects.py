@@ -471,3 +471,23 @@ def test_python_ops_c_pool_reuse(FA):
         del op
         if i % 100 == 0:
             gc.collect()  # an op and its typed ops form a cycle
+
+
+@pyops
+def test_python_ops_any_callable(F, FA):
+    """With is_udt=True, builtins, partials, classes and other callables are UDFs on OBJECT."""
+    import functools
+    import operator
+
+    add = binary.register_anonymous(operator.add, is_udt=True)
+    assert FA.ewise_mult(FA, add).new().get(2, 2) == F(10)
+    least = binary.register_anonymous(min, is_udt=True)
+    assert FA.ewise_mult(FA, least).new().get(0, 1) is FA.get(0, 1)
+    plus3 = unary.register_anonymous(functools.partial(operator.add, 3), is_udt=True)
+    assert FA.apply(plus3).new().get(2, 2) == F(8)
+    to_str = unary.register_anonymous(str, is_udt=True)
+    assert FA.apply(to_str).new().get(1, 1) == "2/3"
+    plus = monoid.register_anonymous(add, F(0))
+    assert FA.reduce_scalar(plus).new().value == F(13, 2)
+    with pytest.raises(TypeError, match="must be a function"):
+        binary.register_anonymous(operator.add)  # Numba needs a Python function

@@ -173,11 +173,13 @@ class UnaryOp(OpBase):
 
     @classmethod
     def _build(cls, name, func, *, anonymous=False, is_udt=False):
-        if type(func) is not FunctionType:
+        # With is_udt=True, any callable may run on OBJECT values (``operator.pyobject``)
+        if type(func) is not FunctionType and not (is_udt and callable(func)):
             raise TypeError(f"UDF argument must be a function, not {type(func)}")
         if name is None:
             name = getattr(func, "__name__", "<anonymous_unary>")
-        if is_udt and not _has_numba:  # for OBJECT only; see ``OpBase._check_supports_udf``
+        if is_udt and (not _has_numba or not isinstance(func, FunctionType)):
+            # For OBJECT only; see ``OpBase._check_supports_udf``
             return cls(name, func, anonymous=anonymous, is_udt=True, numba_func=None)
         success = False
         # Set on the Dispatcher too, not only on the cfunc wrapper; see the note in

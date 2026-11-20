@@ -570,11 +570,12 @@ class BinaryOp(OpBase):
 
     @classmethod
     def _build(cls, name, func, *, is_udt=False, anonymous=False, cache=False):
-        if not isinstance(func, FunctionType):
+        # With is_udt=True, any callable may run on OBJECT values (``operator.pyobject``)
+        if not isinstance(func, FunctionType) and not (is_udt and callable(func)):
             raise TypeError(f"UDF argument must be a function, not {type(func)}")
         if name is None:
             name = getattr(func, "__name__", "<anonymous_binary>")
-        if is_udt and not _has_numba:
+        if is_udt and (not _has_numba or not isinstance(func, FunctionType)):
             return cls(name, func, anonymous=anonymous, is_udt=True, numba_func=None)
         success = False
         # The error model has to be set here, not only on the cfunc wrapper below.
