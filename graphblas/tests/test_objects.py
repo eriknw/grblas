@@ -489,5 +489,6 @@ def test_python_ops_any_callable(F, FA):
     assert FA.apply(to_str).new().get(1, 1) == "2/3"
     plus = monoid.register_anonymous(add, F(0))
     assert FA.reduce_scalar(plus).new().value == F(13, 2)
-    with pytest.raises(TypeError, match="must be a function"):
-        binary.register_anonymous(operator.add)  # Numba needs a Python function
+    if supports_udfs:
+        with pytest.raises(TypeError, match="must be a function"):
+            binary.register_anonymous(operator.add)  # Numba needs a Python function
