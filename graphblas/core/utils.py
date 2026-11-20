@@ -3,7 +3,7 @@ from operator import index
 import numpy as np
 
 from ..dtypes import _INDEX, lookup_dtype
-from . import ffi, lib
+from . import ffi, lib, objects
 from .dtypes import _nats_in_leaf_units, _view_if_same_layout
 
 try:
@@ -199,6 +199,8 @@ def values_to_numpy_buffer(
     """
     if dtype is not None:
         dtype = lookup_dtype(dtype)
+        if dtype._is_object:
+            array = objects.to_handles(array)
         np_type = _get_subdtype(dtype.np_type)
         array = _nats_in_leaf_units(_view_if_same_layout(array, np_type), np_type)
         if ownable:
@@ -273,6 +275,9 @@ def check_values_size(values, dtype, count, is_iso, *, indptr=None, indices=None
 
 def normalize_values(self, values, dtype, shape=None, is_iso=False):
     """Expand and/or update dtype of values array."""
+    if self.dtype._is_object and (dtype is None or lookup_dtype(dtype)._is_object):
+        values = objects.to_objects(values)
+        dtype = None
     if dtype is not None:
         dtype = lookup_dtype(dtype)
         if dtype != self.dtype:

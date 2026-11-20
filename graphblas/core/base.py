@@ -3,7 +3,7 @@ from contextvars import ContextVar
 from .. import backend, config
 from .. import replace as replace_singleton
 from ..exceptions import check_status
-from . import NULL
+from . import NULL, objects
 from .descriptor import lookup as descriptor_lookup
 from .expr import AmbiguousAssignOrExtract, Updater
 from .literals import _literal_store_dtype
@@ -27,6 +27,17 @@ def _is_recording():
 
 
 def call(cfunc_name, args):
+    if objects.active:
+        # No collection while GraphBLAS runs: see ``objects._OpLock``
+        objects._lock.acquire_shared()
+        try:
+            return _call(cfunc_name, args)
+        finally:
+            objects._lock.release_shared()
+    return _call(cfunc_name, args)
+
+
+def _call(cfunc_name, args):
     call_args = [getattr(x, "_carg", x) if x is not None else NULL for x in args]
     cfunc = libget(cfunc_name)
     try:

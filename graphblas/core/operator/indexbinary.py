@@ -466,9 +466,11 @@ class IndexBinaryOp(OpBase):
         dtypes = (dtype, dtype2, theta_type)
         if dtypes in self._udt_types:
             return self._udt_ops[dtypes]
+        from ..objects import check_op
         from ..udt import _refuse_half
 
         _refuse_half(self, *dtypes)
+        check_op(self, *dtypes)
         if self._numba_func is None:
             raise KeyError(f"{self.name} does not work with {dtypes} types")
 

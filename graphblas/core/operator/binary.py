@@ -677,9 +677,11 @@ class BinaryOp(OpBase):
         dtypes = (dtype, dtype2)
         if dtypes in self._udt_types:
             return self._udt_ops[dtypes]
+        from ..objects import check_op
         from ..udt import _refuse_half
 
         _refuse_half(self, dtype, dtype2)
+        check_op(self, dtype, dtype2)
 
         # Built-in ops lift to UDTs by name. A UDF registered under one of those
         # names (``BinaryOp.register_anonymous(func, "plus", is_udt=True)``) is

@@ -13,7 +13,7 @@ from ..exceptions import (
     check_status,
     check_status_carg,
 )
-from . import _supports_udfs, automethods, ffi, lib, utils
+from . import _supports_udfs, automethods, ffi, lib, objects, utils
 from .base import BaseExpression, BaseType, _is_recording, call
 from .descriptor import lookup as descriptor_lookup
 from .dtypes import _raise_dtype_or_arraylike
@@ -246,6 +246,8 @@ class Matrix(BaseType):
         self._nrows = nrows.value
         self._ncols = ncols.value
         self._parent = None
+        if self.dtype._is_object:
+            objects.track(self)
         return self
 
     @classmethod
@@ -257,6 +259,8 @@ class Matrix(BaseType):
         self._nrows = nrows
         self._ncols = ncols
         self._parent = parent
+        if dtype._is_object:
+            objects.track(self)
         return self
 
     def __del__(self):
@@ -517,6 +521,8 @@ class Matrix(BaseType):
         other = self._expect_type(
             other, (Matrix, TransposedMatrix), within="isequal", argname="other"
         )
+        if self.dtype._is_object:
+            return objects.isequal(self, other)
         if check_dtype and self.dtype != other.dtype:
             return False
         if _element_shapes_differ(self.dtype, other.dtype):
@@ -567,6 +573,8 @@ class Matrix(BaseType):
         other = self._expect_type(
             other, (Matrix, TransposedMatrix), within="isclose", argname="other"
         )
+        if self.dtype._is_object:
+            return objects.isequal(self, other)
         if check_dtype and self.dtype != other.dtype:
             return False
         if self._nrows != other._nrows:

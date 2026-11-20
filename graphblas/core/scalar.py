@@ -5,7 +5,7 @@ import numpy as np
 from .. import backend, binary, config, monoid
 from ..dtypes import _INDEX, FP64, _index_dtypes, lookup_dtype, unify
 from ..exceptions import EmptyObject, check_status
-from . import _has_numba, _supports_udfs, automethods, ffi, lib, utils
+from . import _has_numba, _supports_udfs, automethods, ffi, lib, objects, utils
 from .base import BaseExpression, BaseType, _is_recording, call
 from .expr import AmbiguousAssignOrExtract
 from .literals import (
@@ -101,6 +101,8 @@ class Scalar(BaseType):
         else:
             self.gb_obj = ffi_new("GrB_Scalar*")
             call("GrB_Scalar_new", [_Pointer(self), dtype])
+        if dtype._is_object:
+            objects.track(self)
         return self
 
     @classmethod
@@ -110,6 +112,8 @@ class Scalar(BaseType):
         self.gb_obj = gb_obj
         self.dtype = dtype
         self._is_cscalar = is_cscalar
+        if dtype._is_object:
+            objects.track(self)
         return self
 
     def __del__(self):
@@ -230,6 +234,8 @@ class Scalar(BaseType):
         :meth:`isclose` : For equality check of floating point dtypes
 
         """
+        if self.dtype._is_object:
+            return objects.isequal(self, other)
         if type(other) is not Scalar:
             if other is None:
                 return self._is_empty
@@ -290,6 +296,8 @@ class Scalar(BaseType):
         bool
 
         """
+        if self.dtype._is_object:
+            return objects.isequal(self, other)
         if self.dtype._is_udt:
             raise TypeError(
                 f"Scalar.isclose is not defined for user-defined types (got {self.dtype.name!r}); "

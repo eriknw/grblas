@@ -24,7 +24,7 @@ if _supports_complex:
 
 
 def __dir__():
-    return globals().keys() | {"ss"}
+    return globals().keys() | {"ss", "OBJECT"}
 
 
 def __getattr__(key):
@@ -40,6 +40,10 @@ def __getattr__(key):
         ss = import_module(".ss", __name__)
         globals()["ss"] = ss
         return ss
+    if key == "OBJECT":
+        # Made on first use (``core.dtypes._object_dtype``)
+        rv = globals()["OBJECT"] = lookup_dtype(key)
+        return rv
     raise AttributeError(f"module {__name__!r} has no attribute {key!r}")
 
 

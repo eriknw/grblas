@@ -29,6 +29,8 @@ class DataType:
         # registration, or ``None``. SuiteSparse takes each only once, so a
         # later rename of the UDT (``register_anonymous``) does not change them.
         "_jit_c_info",
+        # True only for ``OBJECT``, whose values are Python objects (``core.objects``)
+        "_is_object",
         "__weakref__",
     )
 
@@ -40,6 +42,7 @@ class DataType:
         self.numba_type = numba_type
         self.np_type = np.dtype(np_type) if np_type is not None else None
         self._jit_c_info = None
+        self._is_object = False
 
     def __repr__(self):
         return self.name
@@ -302,6 +305,8 @@ def register_anonymous(dtype, name=None):
         # Always use the same object, but use the latest name. Its C name stays
         # the first one (``DataType._jit_c_info``).
         rv = _registry[dtype]
+        if rv._is_object:
+            raise ValueError(f"dtype {dtype} is the storage of OBJECT; use another field name")
         if name is not None:
             if rv.gb_name is not None and name != rv.gb_name:
                 raise ValueError("dtype must not be a builtin type")
@@ -551,6 +556,8 @@ def lookup_dtype(key, value=None):
         return lookup_dtype(_numba_as_dtype(key))
     if value is not None and hasattr(value, "dtype") and value.dtype in _registry:
         return _registry[value.dtype]
+    if _is_object_key(key):
+        return _object_dtype()
     # np.dtype(x) accepts some weird values; we may want to guard against some
     if key is None:
         raise TypeError("Bad dtype: None.  A valid dtype must be provided.")
@@ -564,6 +571,23 @@ def lookup_dtype(key, value=None):
     except Exception:
         pass
     raise ValueError(f"Unknown dtype: {key} of type {type(key)}")
+
+
+def _is_object_key(key):
+    if key is object:
+        return True
+    if isinstance(key, str):
+        return key in {"OBJECT", "object", "O"}
+    return isinstance(key, np.dtype) and key.kind == "O"
+
+
+def _object_dtype():
+    """Return ``OBJECT``, made on first use: making it needs the operator package."""
+    from . import objects
+
+    if objects.OBJECT is None:
+        objects.OBJECT = objects._make_dtype()
+    return objects.OBJECT
 
 
 def _raise_dtype_or_arraylike(cls_name, dtype, exc):

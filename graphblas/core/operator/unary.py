@@ -255,9 +255,11 @@ class UnaryOp(OpBase):
     def _compile_udt(self, dtype, dtype2):
         if dtype in self._udt_types:
             return self._udt_ops[dtype]
+        from ..objects import check_op
         from ..udt import _refuse_half
 
         _refuse_half(self, dtype)
+        check_op(self, dtype)
         # A built-in type that a lifted op lacks raises the usual KeyError, as in
         # ``BinaryOp._compile_udt``
         if not dtype._is_udt and self._numba_func is None:

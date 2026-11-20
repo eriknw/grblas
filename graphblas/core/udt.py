@@ -31,7 +31,7 @@ from operator import mul
 import numpy as np
 
 from ..exceptions import DomainMismatch
-from . import _has_numba, ffi, utils
+from . import _has_numba, ffi, objects, utils
 from .dtypes import _nats_in_leaf_units, _registry, _view_if_same_layout, lookup_dtype
 from .utils import output_type
 
@@ -762,6 +762,8 @@ def _element_bytes(dtype, value):
     ``value`` is anything numpy assigns to one element: a tuple or dict for a
     record, an array or sequence for an array UDT, or a number for every leaf.
     """
+    if dtype._is_object:
+        return objects.element_bytes(value)
     np_type = dtype.np_type
     if np_type.subdtype is None:
         arr = np.zeros(1, dtype=np_type)
@@ -790,6 +792,8 @@ def _element_bytes(dtype, value):
 
 def _element_value(dtype, data):
     """Return the element of UDT ``dtype`` that cffi ``data`` holds: a record or an array."""
+    if dtype._is_object:
+        return objects.element_value(data)
     np_type = dtype.np_type
     rv = np.array(ffi.buffer(data[0 : np_type.itemsize]))
     if np_type.subdtype is None:
