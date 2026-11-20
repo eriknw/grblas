@@ -8,7 +8,7 @@ from .descriptor import lookup as descriptor_lookup
 from .expr import AmbiguousAssignOrExtract, Updater
 from .literals import _literal_store_dtype
 from .mask import Mask, _check_mask
-from .operator import UNKNOWN_OPCLASS, binary_from_string, find_opclass, get_typed_op
+from .operator import UNKNOWN_OPCLASS, binary_from_string, find_opclass, get_typed_op, pyobject
 from .udt import _fused_store_expr, _scalar_accum_operand, _store_cast_op
 from .utils import _Pointer, libget, output_type
 
@@ -28,6 +28,8 @@ def _is_recording():
 
 def call(cfunc_name, args):
     if objects.active and objects.touches_object(args):
+        if pyobject._callbacks and pyobject.uses_python_op(args):
+            return pyobject.run(_call, cfunc_name, args)
         # No collection while GraphBLAS uses an OBJECT container: see ``objects._OpLock``
         objects._lock.acquire_shared()
         try:

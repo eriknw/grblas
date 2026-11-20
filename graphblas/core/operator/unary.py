@@ -259,7 +259,8 @@ class UnaryOp(OpBase):
         from ..udt import _refuse_half
 
         _refuse_half(self, dtype)
-        check_op(self, dtype)
+        if (op := check_op(self, dtype, typed_cls=TypedUserUnaryOp)) is not None:
+            return op  # calls Python on OBJECT values (``objects.check_op``)
         # A built-in type that a lifted op lacks raises the usual KeyError, as in
         # ``BinaryOp._compile_udt``
         if not dtype._is_udt and self._numba_func is None:

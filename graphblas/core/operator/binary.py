@@ -681,7 +681,8 @@ class BinaryOp(OpBase):
         from ..udt import _refuse_half
 
         _refuse_half(self, dtype, dtype2)
-        check_op(self, dtype, dtype2)
+        if (op := check_op(self, dtype, dtype2, typed_cls=TypedUserBinaryOp)) is not None:
+            return op  # calls Python on OBJECT values (``objects.check_op``)
 
         # Built-in ops lift to UDTs by name. A UDF registered under one of those
         # names (``BinaryOp.register_anonymous(func, "plus", is_udt=True)``) is

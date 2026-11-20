@@ -68,6 +68,9 @@ def _literal_operand(dtype, value, op, *, left=False):
         return value, None
     if isinstance(op, TypedOpBase):
         dtype = op.type if left or op._type2 is None else op._type2
+    if dtype._is_object and not isinstance(value, (bool, int, float, complex, np.generic)):
+        # Any other object is an OBJECT element; a number keeps its own type
+        return value, dtype
     if not dtype._is_udt:
         literal_dtype = _weak_builtin_literal_dtype(dtype, value, op)
         if (

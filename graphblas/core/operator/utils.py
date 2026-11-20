@@ -24,6 +24,7 @@ from .base import (
     TypedOpBase,
     _builtin_to_op,
     _hasop,
+    _python_op_for_object,
     find_opclass,
 )
 from .binary import BinaryOp
@@ -84,6 +85,10 @@ def get_typed_op(op, dtype, dtype2=None, *, is_left_scalar=False, is_right_scala
             if op.is_positional:
                 return op[UINT64]
             if op._udt_types is None:
+                if (dtype._is_object or dtype2._is_object) and (
+                    rv := _python_op_for_object(op, dtype, dtype2)
+                ) is not None:
+                    return rv
                 raise KeyError(f"{op.name} does not work with ({dtype}, {dtype2})")
             if isinstance(op, Monoid):
                 # A Monoid has one type, but used element-wise it acts as its
@@ -104,6 +109,10 @@ def get_typed_op(op, dtype, dtype2=None, *, is_left_scalar=False, is_right_scala
             if op.is_positional:
                 return op[UINT64]
             if op._udt_types is None:
+                if (dtype._is_object or dtype2._is_object) and (
+                    rv := _python_op_for_object(op, dtype, dtype2)
+                ) is not None:
+                    return rv
                 raise
             return op._compile_udt(dtype, dtype2)
     if isinstance(op, ParameterizedUdf):

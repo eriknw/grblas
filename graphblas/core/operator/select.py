@@ -269,7 +269,8 @@ class SelectOp(OpBase):
         from ..udt import _refuse_half
 
         _refuse_half(self, dtype, dtype2)
-        check_op(self, dtype, dtype2)
+        if (op := check_op(self, dtype, dtype2, typed_cls=TypedUserSelectOp)) is not None:
+            return op  # calls Python on OBJECT values (``objects.check_op``)
         if self._numba_func is None:
             raise KeyError(f"{self.name} does not work with {dtypes} types")
 

@@ -1,0 +1,245 @@
+"""Operators that call Python functions on OBJECT values from inside GraphBLAS.
+
+A user's function registered as a BinaryOp, UnaryOp, IndexUnaryOp or SelectOp
+(``binary.register_anonymous(func)`` and the like) and typed for OBJECT does not
+compile with Numba. It becomes a GraphBLAS op whose C function is a trampoline:
+it reads the handles SuiteSparse passes, resolves them to objects, calls the
+function, and writes the handle of the result (or a bool, for a SelectOp).
+Monoids and semirings built from such a BinaryOp then work too, so ``mxm``,
+``reduce`` and the rest run the Python function inside SuiteSparse's kernels.
+
+The trampoline here is a cffi callback, which needs neither a C compiler nor
+Numba. cffi callbacks take the GIL per call and do not scale across threads,
+so every call that runs a Python op asks SuiteSparse for one thread (``run``).
+
+A result that ``is`` one of the inputs reuses that input's handle, so ``min``
+and the like return a stored object without allocating, and a monoid's
+terminal value can be recognized.
+
+Errors: the first exception in a call is kept, the function is not called
+again in that call (each later element gets handle 0), and ``run`` raises it
+after GraphBLAS returns. ``.new()`` then drops its result. ``C << expr`` has
+already written into ``C``, which may hold some new values and some handles 0;
+handle 0 fails when it is read (``objects.InvalidHandle``). A KeyboardInterrupt
+in the function is handled the same way, so Ctrl-C stops the call.
+"""
+
+import sys
+import threading
+
+from ... import backend
+from ...dtypes import BOOL
+from ...exceptions import check_status_carg
+from .. import ffi, lib, objects
+
+_HAS_GIL = getattr(sys, "_is_gil_enabled", lambda: True)()
+
+# Python-op calls run one at a time, so one error slot serves them. Reentrant:
+# a Python op may itself run a GraphBLAS call that runs a Python op.
+_run_lock = threading.RLock()
+_error = None
+
+# id of each typed op that calls Python -> its cffi callback (kept alive here)
+_callbacks = {}
+
+_SIGNATURES = {
+    "UnaryOp": "GxB_unary_function",
+    "BinaryOp": "GxB_binary_function",
+    "IndexUnaryOp": "GxB_index_unary_function",
+    "SelectOp": "GxB_index_unary_function",
+}
+
+
+def _reader(dtype):
+    """Return ``read(void_ptr) -> value`` for an input of type ``dtype``."""
+    if dtype._is_object:
+        resolve = objects.resolve_in_call
+
+        def read(ptr):
+            return resolve(ffi.cast("uint64_t*", ptr)[0])
+
+        return read
+    if dtype._is_udt:
+        raise KeyError(f"a Python op on OBJECT cannot also take {dtype}")
+    c_ptr = f"{dtype.c_type}*"
+
+    def read(ptr):
+        return ffi.cast(c_ptr, ptr)[0]
+
+    return read
+
+
+def _make_body(kind, func, dtype, dtype2, ret_type):
+    """Return the Python function the cffi callback runs."""
+    read_x = _reader(dtype)
+    is_bool = ret_type is BOOL
+    intern = objects.intern_in_call
+    in_x = dtype._is_object
+    if kind == "BinaryOp":
+        read_y = _reader(dtype2)
+        in_y = dtype2._is_object
+
+        def body(z, x, y):
+            global _error
+            if _error is not None:
+                ffi.cast("uint64_t*", z)[0] = 0
+                return
+            try:
+                a = read_x(x)
+                b = read_y(y)
+                r = func(a, b)
+                # Reuse an input's handle when the result is that input
+                if in_x and r is a:
+                    h = ffi.cast("uint64_t*", x)[0]
+                elif in_y and r is b:
+                    h = ffi.cast("uint64_t*", y)[0]
+                else:
+                    h = intern(r)
+                ffi.cast("uint64_t*", z)[0] = h
+            except (Exception, KeyboardInterrupt) as exc:  # ``run`` raises it
+                _error = exc
+                ffi.cast("uint64_t*", z)[0] = 0
+
+    elif kind == "UnaryOp":
+
+        def body(z, x):
+            global _error
+            if _error is not None:
+                ffi.cast("uint64_t*", z)[0] = 0
+                return
+            try:
+                a = read_x(x)
+                r = func(a)
+                h = ffi.cast("uint64_t*", x)[0] if in_x and r is a else intern(r)
+                ffi.cast("uint64_t*", z)[0] = h
+            except (Exception, KeyboardInterrupt) as exc:  # ``run`` raises it
+                _error = exc
+                ffi.cast("uint64_t*", z)[0] = 0
+
+    else:  # IndexUnaryOp, SelectOp: func(x, row, col, thunk)
+        read_y = _reader(dtype2)
+
+        if is_bool:
+
+            def body(z, x, i, j, y):
+                global _error
+                if _error is not None:
+                    ffi.cast("bool*", z)[0] = False
+                    return
+                try:
+                    ffi.cast("bool*", z)[0] = bool(func(read_x(x), i, j, read_y(y)))
+                except (Exception, KeyboardInterrupt) as exc:  # ``run`` raises it
+                    _error = exc
+                    ffi.cast("bool*", z)[0] = False
+
+        else:
+
+            def body(z, x, i, j, y):
+                global _error
+                if _error is not None:
+                    ffi.cast("uint64_t*", z)[0] = 0
+                    return
+                try:
+                    a = read_x(x)
+                    r = func(a, i, j, read_y(y))
+                    h = ffi.cast("uint64_t*", x)[0] if in_x and r is a else intern(r)
+                    ffi.cast("uint64_t*", z)[0] = h
+                except (Exception, KeyboardInterrupt) as exc:  # ``run`` raises it
+                    _error = exc
+                    ffi.cast("uint64_t*", z)[0] = 0
+
+    return body
+
+
+def compile_op(parent, dtype, dtype2, typed_cls):
+    """Make, cache and return the typed op that calls ``parent.orig_func`` on OBJECT values.
+
+    Called from an op class's ``_compile_udt`` when an input is OBJECT and the
+    op is a user's function. Its result is OBJECT, or BOOL for a SelectOp.
+    """
+    from ..dtypes import _object_dtype
+
+    kind = typed_cls.opclass
+    ret_type = BOOL if kind == "SelectOp" else _object_dtype()
+    body = _make_body(kind, parent.orig_func, dtype, dtype2, ret_type)
+    callback = ffi.callback(_SIGNATURES[kind], body)
+    c_typename = {"SelectOp": "GrB_IndexUnaryOp"}.get(kind, f"GrB_{kind}")
+    gb_obj = ffi.new(f"{c_typename}*")
+    new_func = getattr(lib, f"{c_typename}_new")
+    label = c_typename.removeprefix("GrB_")
+    if kind == "UnaryOp":
+        status = new_func(gb_obj, callback, ret_type._carg, dtype._carg)
+        op = typed_cls(parent, parent.name, dtype, ret_type, gb_obj[0])
+        key = dtype
+    else:
+        status = new_func(gb_obj, callback, ret_type._carg, dtype._carg, dtype2._carg)
+        op = typed_cls(parent, parent.name, dtype, ret_type, gb_obj[0], dtype2=dtype2)
+        key = (dtype, dtype2)
+    check_status_carg(status, label, gb_obj[0])
+    _callbacks[id(op)] = callback
+    parent._udt_types[key] = ret_type
+    parent._udt_ops[key] = op
+    return op
+
+
+def uses_python_op(args):
+    """Whether a typed op in ``call``'s arguments (or in a monoid or semiring) calls Python."""
+    for x in args:
+        if id(x) in _callbacks:
+            return True
+        opclass = getattr(x, "opclass", None)
+        if opclass == "Monoid":
+            if id(x.binaryop) in _callbacks:
+                return True
+        elif opclass == "Semiring" and (
+            id(x.binaryop) in _callbacks or id(x.monoid.binaryop) in _callbacks
+        ):
+            return True
+    return False
+
+
+def _one_thread(desc):
+    """Return ``desc`` (a Descriptor or None) asking SuiteSparse for one thread.
+
+    A descriptor made with other options (``axb_method``, ``nthreads``) is kept
+    as given: its options cannot be read back to copy them.
+    """
+    from ..descriptor import BuiltinDescriptor, lookup
+
+    if desc is not None and type(desc) is not BuiltinDescriptor:
+        return desc
+    if desc is None:
+        return lookup(nthreads=1)
+    return lookup(
+        output_replace=desc.output_replace,
+        mask_complement=desc.mask_complement,
+        mask_structure=desc.mask_structure,
+        transpose_first=desc.transpose_first,
+        transpose_second=desc.transpose_second,
+        nthreads=1,
+    )
+
+
+def run(call, cfunc_name, args):
+    """Run a GraphBLAS call whose op calls Python; raise the first error it hit.
+
+    Holds the collector's lock shared, so a collection asked for by the many
+    allocations of a call waits until the call returns (``objects._OpLock``).
+    """
+    global _error
+    from ..descriptor import Descriptor
+
+    if backend == "suitesparse" and args and (args[-1] is None or isinstance(args[-1], Descriptor)):
+        # cffi callbacks serialize on the GIL (and run no faster without it)
+        args = [*args[:-1], _one_thread(args[-1])]
+    with _run_lock:
+        outer, _error = _error, None
+        objects._lock.acquire_shared()
+        try:
+            rv = call(cfunc_name, args)
+        finally:
+            objects._lock.release_shared()
+            error, _error = _error, outer
+    if error is not None:
+        raise error
+    return rv

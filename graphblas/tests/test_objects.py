@@ -169,12 +169,6 @@ def test_refuses_value_ops(A):
         A.apply(unary.ainv).new()
 
 
-@pytest.mark.skipif(not supports_udfs, reason="first, second and any on a UDT need Numba")
-def test_refuses_udf(A):
-    with pytest.raises(KeyError, match="OBJECT"):
-        A.apply(unary.register_anonymous(lambda x: x)).new()
-
-
 def test_isequal_is_identity():
     """Isequal compares objects by identity, not ``==``."""
     a = [[1], [2]]

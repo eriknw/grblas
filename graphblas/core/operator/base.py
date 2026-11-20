@@ -318,6 +318,23 @@ class ParameterizedUdf:
 _VARNAMES = tuple(x for x in dir(lib) if x[0] != "_")
 
 
+def _python_op_for_object(op, dtype, dtype2=None):
+    """Type a UDF, or a monoid or semiring made of one, for OBJECT; None if it is neither.
+
+    An op registered without ``is_udt=True`` has no UDT typing, so it gets here
+    instead of ``_compile_udt``; for OBJECT it calls Python (``operator.pyobject``).
+    """
+    from .monoid import Monoid
+    from .semiring import Semiring
+
+    if getattr(op, "orig_func", None) is None and not isinstance(op, (Monoid, Semiring)):
+        return None
+    if op._udt_types is None:
+        op._udt_types = {}
+        op._udt_ops = {}
+    return op._compile_udt(dtype, dtype if dtype2 is None else dtype2)
+
+
 class OpBase:
     __slots__ = (
         "name",
@@ -360,6 +377,8 @@ class OpBase:
                 if self._udt_types is None:
                     if self.is_positional:
                         return self._typed_ops[UINT64]
+                    if type_._is_object and (rv := _python_op_for_object(self, type_)) is not None:
+                        return rv
                     raise KeyError(f"{self.name} does not work with {type_}")
             else:
                 return self._typed_ops[type_]

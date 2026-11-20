@@ -234,6 +234,24 @@ class _Heap:
         self.allocated += n
         return handles
 
+    def allocate_one(self, obj):
+        """``allocate`` for one object, without numpy temporaries."""
+        if self.free:
+            slot = self.free.pop()
+        else:
+            slot = self.top
+            self.top += 1
+            self._grow(self.top)
+        self.slab[slot] = obj
+        self.alive[slot] = True
+        gen = int(self.gen[slot]) or 1
+        self.gen[slot] = gen
+        handle = gen << _SLOT_BITS | slot
+        self.by_id[id(obj)] = handle
+        self.nlive += 1
+        self.allocated += 1
+        return handle
+
     def intern(self, objects):
         """Return the handles of an object ndarray, allocating for objects not yet stored."""
         by_id = self.by_id
@@ -471,6 +489,36 @@ def to_objects(values):
         return heap.slab.take(slots).reshape(handles.shape)
 
 
+def resolve_in_call(handle):
+    """Return the object of one handle (an int), in a call that holds the lock shared.
+
+    The trampolines of ``operator.pyobject`` use it: no collection runs during
+    the call, so this takes no lock.
+    """
+    heap = _heap
+    slot = handle & 0xFFFFFFFFFF
+    if 0 < slot < heap.top and heap.alive[slot] and heap.gen[slot] == handle >> 40:
+        return heap.slab[slot]
+    raise InvalidHandle(f"{handle:#x} is not the handle of a live object")
+
+
+def intern_in_call(obj):
+    """Return the handle of ``obj``, in a call that holds the lock shared.
+
+    The handle goes straight into GraphBLAS's output, so it needs no carrier: no
+    collection runs until the call returns, and by then the output container
+    holds it. A collection due now is deferred to then.
+    """
+    heap = _heap
+    with _heap_lock:
+        handle = heap.by_id.get(id(obj))
+        if handle is None:
+            handle = heap.allocate_one(obj)
+            if heap.allocated > max(threshold, heap.live_after_gc):
+                _lock.requested = True
+    return handle
+
+
 def element_bytes(value):
     """Return the handle of one object as a uint8 array (a carrier) for a Scalar's buffer."""
     return to_handles([value]).view(np.uint8)
@@ -482,23 +530,28 @@ def element_value(data):
     return to_objects(handles)[0]
 
 
-def check_op(op, *dtypes):
-    """Raise KeyError unless ``op`` only selects, copies or ignores OBJECT values.
+def check_op(op, *dtypes, typed_cls=None):
+    """Return None, a typed op that calls Python, or raise KeyError, for ``op`` on OBJECT.
 
-    Arithmetic, comparison and value-dependent ops would read handles as
-    numbers. An op made to call Python on objects sets ``_object_op``.
+    None (the usual path) for an op on no OBJECT input, or one that only
+    selects, copies or ignores values. A user's function (``orig_func``) on an
+    OBJECT input becomes an op that calls it on the objects
+    (``operator.pyobject``); ``typed_cls`` is the class of that op. Any other op,
+    arithmetic or comparison, would read handles as numbers: KeyError.
     """
     if not any(dtype is OBJECT for dtype in dtypes if dtype is not None):
-        return
-    if getattr(op, "_object_op", False):
-        return
+        return None
     allowed = _STRUCTURAL_OPS.get(type(op).__name__, ())
     if op.name in allowed and not getattr(op, "_anonymous", False):
-        return
+        return None
+    if typed_cls is not None and getattr(op, "orig_func", None) is not None:
+        from .operator.pyobject import compile_op
+
+        return compile_op(op, dtypes[0], dtypes[1] if len(dtypes) > 1 else None, typed_cls)
     raise KeyError(
         f"{op.name} does not work with OBJECT: GraphBLAS stores objects as handles, so only "
-        "ops that select or copy values (first, second, any, pair, identity) and positional "
-        "ops apply"
+        "ops that select or copy values (first, second, any, pair, identity), positional "
+        "ops and your own Python functions apply"
     )
 
 
