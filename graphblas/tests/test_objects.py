@@ -764,3 +764,128 @@ def test_python_op_calls_from_several_threads():
     for t in threads:
         t.join()
     assert not errors
+
+
+@pyops
+def test_python_op_waiting_on_another_threads_call(monkeypatch):
+    """A Python op that waits for another thread's Python-op call raises instead of hanging."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from graphblas.core.operator import pyobject
+
+    monkeypatch.setattr(pyobject, "wait_timeout", 1.0)
+    neg = unary.register_anonymous(lambda x: -x, is_udt=True)
+    pool = ThreadPoolExecutor(1)
+
+    def inner(x):
+        return Vector.from_coo([0], [x], dtype=OBJECT).apply(neg).new().get(0)
+
+    op = unary.register_anonymous(lambda x: pool.submit(inner, x).result(), is_udt=True)
+    v = Vector.from_coo([0, 1], [10, 20], dtype=OBJECT)
+    result = []
+
+    def work():
+        try:
+            v.apply(op).new(**({"nthreads": 1} if suitesparse else {}))
+            result.append("ok")
+        except RuntimeError as exc:
+            result.append(exc)
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(30)
+    pool.shutdown(wait=False)
+    assert result, "hung"
+    assert isinstance(result[0], RuntimeError)
+    assert "another thread" in str(result[0])
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (np.array([1, 2, 3]), [1, 2, 3]),
+        (np.array([0.5, 1.5, 2.5]), [0.5, 1.5, 2.5]),
+        (range(3), [0, 1, 2]),
+        (__import__("collections").deque(["a", "b", "c"]), ["a", "b", "c"]),
+        ("abc", ["abc"] * 3),
+        (b"xy", [b"xy"] * 3),
+    ],
+)
+def test_from_coo_values_kinds(values, expected):
+    """For OBJECT, a numeric array and any sequence but str or bytes give one value per index."""
+    v = Vector.from_coo([0, 1, 2], values, dtype=OBJECT)
+    assert v.to_coo()[1].tolist() == expected
+
+
+@pytest.mark.parametrize("values", [{1, 2, 3}, {0: 1, 1: 2, 2: 3}, (x for x in range(3))])
+def test_from_coo_values_unordered(values):
+    """A set, dict or generator as OBJECT values raises: one value per index or one object?"""
+    with pytest.raises(TypeError, match="list"):
+        Vector.from_coo([0, 1, 2], values, dtype=OBJECT)
+
+
+def test_from_coo_none_value():
+    """None as the one value of every entry."""
+    v = Vector.from_coo([0, 2], None, dtype=OBJECT, size=3)
+    assert v.nvals == 2
+    assert v.to_coo()[1].tolist() == [None, None]
+
+
+def test_sigint_while_reporting_an_error():
+    """Ctrl-C landing while an error is being recorded does not deadlock."""
+    from graphblas.core.operator import _cshim, pyobject
+
+    done = []
+
+    def work():
+        with pyobject._error_lock:  # as a trampoline reporting on the main thread
+            pyobject._on_sigint(2, None)
+        done.append(1)
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(10)
+    pyobject._error = None
+    _cshim.exit_call(_cshim.enter_call(False))  # clear the C flag it set
+    if _cshim._mod:
+        _cshim._mod.lib.HEAP.errflag = 0
+    assert done, "deadlocked"
+
+
+def test_empty_iso_subclass_argument():
+    """An empty iso input of a subclass type counts, even after another OBJECT argument."""
+
+    class MyMatrix(Matrix):
+        __slots__ = ()
+
+    A = Matrix.from_coo([0], [0], [Thing("a")], dtype=OBJECT, nrows=1, ncols=1)
+    E = Matrix(OBJECT, 1, 0)
+    E[:, :] = Thing("e")
+    if suitesparse and not E.ss.is_iso:
+        pytest.skip("not iso")
+    sub = MyMatrix._from_obj(E.gb_obj, OBJECT, 1, 0, parent=E)
+    assert objects.has_empty_iso([A, sub])
+
+
+@pyops
+def test_collect_loop_does_not_starve_calls():
+    """A thread calling collect() in a loop lets other threads' calls take turns."""
+    import time
+
+    neg = unary.register_anonymous(lambda x: -x, is_udt=True)
+    v = Vector.from_coo(range(100), list(range(100)), dtype=OBJECT)
+    v.apply(neg).new()  # make the op first (the first C op attaches the heap)
+    stop = time.perf_counter() + 2
+
+    def collector():
+        while time.perf_counter() < stop:
+            objects.collect()
+
+    t = threading.Thread(target=collector)
+    t.start()
+    rounds = 0
+    while time.perf_counter() < stop:
+        v.apply(neg).new()
+        rounds += 1
+    t.join()
+    assert rounds >= 20

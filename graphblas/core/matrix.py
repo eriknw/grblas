@@ -1080,7 +1080,11 @@ class Matrix(BaseType):
                 )
             if backend == "suitesparse":
                 value = objects.iso_value(values) if dtype._is_object else values.tolist()
-                C.ss.build_scalar(rows, columns, value)
+                if dtype._is_object and value is None:
+                    # A Scalar of None is empty: give every index the handle instead
+                    C.build(rows, columns, np.broadcast_to(values, (rows.size,)))
+                else:
+                    C.ss.build_scalar(rows, columns, value)
             else:
                 values = np.broadcast_to(values, (rows.size, *dtype.np_type.shape))
                 C.build(rows, columns, values, dup_op=binary.any)

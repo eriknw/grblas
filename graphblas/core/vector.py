@@ -869,7 +869,11 @@ class Vector(BaseType):
                 )
             if backend == "suitesparse":
                 value = objects.iso_value(values) if dtype._is_object else values.tolist()
-                w.ss.build_scalar(indices, value)
+                if dtype._is_object and value is None:
+                    # A Scalar of None is empty: give every index the handle instead
+                    w.build(indices, np.broadcast_to(values, (indices.size,)))
+                else:
+                    w.ss.build_scalar(indices, value)
             else:
                 values = np.broadcast_to(values, (indices.size, *dtype.np_type.shape))
                 w.build(indices, values, dup_op=binary.any)

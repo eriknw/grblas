@@ -30,6 +30,7 @@ where they go out, :func:`track` when an OBJECT container is made, and
 import itertools
 import threading
 import weakref
+from collections.abc import Iterator, Mapping, Sequence, Set
 from threading import get_ident as _get_ident
 
 import numpy as np
@@ -104,6 +105,8 @@ class _OpLock:
         self._active = 0  # threads holding the lock shared
         self._owner = None  # thread holding it exclusively
         self._waiting = 0  # threads waiting for it exclusively
+        self._shared_waiting = 0  # threads waiting for it shared
+        self._shared_turn = False  # those go first, before another collection
         self._local = threading.local()
         self.requested = False
 
@@ -124,8 +127,11 @@ class _OpLock:
         else:
             mutex.release()
             with self._cond:
+                self._shared_waiting += 1
                 while self._owner is not None:
                     self._cond.wait()
+                self._shared_waiting -= 1
+                self._shared_turn = False
                 self._active += 1
         local.depth = 1
 
@@ -152,7 +158,7 @@ class _OpLock:
         if getattr(self._local, "depth", 0):
             return False  # invariant 4: we hold it shared
         with self._cond:
-            while self._active or self._owner is not None:
+            while self._active or self._owner is not None or self._shared_turn:
                 if not blocking:
                     return False
                 self._waiting += 1
@@ -166,6 +172,10 @@ class _OpLock:
     def release_exclusive(self):
         with self._cond:
             self._owner = None
+            # Threads that waited for this collection go before the next one, or a
+            # thread calling collect() in a loop starves them (with the GIL, the
+            # collector takes the lock again before a waiter wakes)
+            self._shared_turn = self._shared_waiting > 0
             self._cond.notify_all()
 
     def __enter__(self):
@@ -580,7 +590,9 @@ def has_empty_iso(args):
     (never filled), and drops the result (``operator.pyobject``).
     """
     for x in args:
-        kind = _arg_kinds.get(type(x), -1)
+        kind = _arg_kinds.get(type(x))
+        if kind is None:
+            kind = _arg_kinds[type(x)] = _classify(type(x))
         if kind == 1:
             x = x.val
         elif kind != 0:
@@ -628,8 +640,9 @@ def track(container):
 def to_handles(values, *, shape=None):
     """Return ``values`` (objects) as an array of handles with dtype ``STORAGE``.
 
-    A list, tuple or ndarray gives one handle per item; any other value is one
-    object, given as a 0-d array (``from_coo`` makes an iso container of it). The
+    An ndarray (of any dtype) or a sequence other than str and bytes gives one
+    handle per item; a set, dict or iterator raises TypeError; any other value is
+    one object, given as a 0-d array (``from_coo`` makes an iso container of it). The
     result is a carrier: the collector keeps its handles alive while it, or any
     view of it, exists, so the caller may store them later. An array that already
     has dtype ``STORAGE`` (from ``ss.export``) passes through.
@@ -638,15 +651,21 @@ def to_handles(values, *, shape=None):
         # Not checked: the values of a bitmap export include garbage where there is
         # no entry. A stale handle fails when it is resolved.
         return values
-    if isinstance(values, np.ndarray) and values.dtype == object:
-        objects = values.ravel()
+    if isinstance(values, np.ndarray):
+        objects = values.astype(object).ravel()  # numbers become Python scalars
         shape = values.shape
-    elif isinstance(values, (list, tuple)):
+    elif isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
+        values = list(values)
         objects = np.empty(len(values), dtype=object)
         objects[:] = _as_cells(values)
         shape = (len(values),)
+    elif isinstance(values, (Set, Mapping, Iterator)):
+        raise TypeError(
+            f"OBJECT values may not be a {type(values).__name__}: use a list for a value "
+            "per index, or [x] * n (or a non-container x) for one object at every index"
+        )
     else:
-        # Anything else (a str, a Fraction, a generator) is one object: an iso build
+        # Anything else (a str, a Fraction, None) is one object: an iso build
         objects = np.empty(1, dtype=object)
         objects[0] = values
         shape = ()

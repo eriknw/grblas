@@ -27,7 +27,13 @@ anywhere else raises ``objects.InvalidHandle``.
 A Python op may itself run a GraphBLAS call with a Python op, on its own
 thread, when its call uses one thread (always with the GIL; ``nthreads=1``
 without it). Otherwise that raises RuntimeError: the calls share one error
-state, and a worker would wait for its own call.
+state, and a worker would wait for its own call. Calls with Python ops run one
+at a time across threads, so a Python op must not wait for another thread that
+runs one (``wait_timeout``).
+
+Nothing is collected during a call, so a call's results all take slots until it
+returns (an mxm claims a slot per product it keeps, and some it drops), and the
+heap's chunks never shrink.
 
 Errors: the first exception in a call is kept, the function is not called
 again in that call (each later element gets handle 0), and ``run`` raises it
@@ -54,8 +60,13 @@ _HAS_GIL = getattr(sys, "_is_gil_enabled", lambda: True)()
 # a Python op may itself run a GraphBLAS call that runs a Python op.
 _run_lock = threading.RLock()
 _run_owner = None  # thread id holding _run_lock
+# Seconds a Python-op call waits for another thread's to finish, then RuntimeError
+# (None: forever). A Python op that waits for another thread running such a call
+# would otherwise wait forever.
+wait_timeout = 60.0
 _error = None
-_error_lock = threading.Lock()
+# Reentrant: Ctrl-C (``_on_sigint``) may land while this thread holds it
+_error_lock = threading.RLock()
 
 # id of each typed op that calls Python -> ("c", func) or ("cffi", callback);
 # removed when the op is garbage (``_forget``)
@@ -397,7 +408,14 @@ def run(call, cfunc_name, args, kind):
             "a Python op on OBJECT cannot run a GraphBLAS call with a Python op while its "
             "own call may use several threads; use nthreads=1 for the outer call"
         )
-    with _run_lock:
+    if not _run_lock.acquire(timeout=-1 if wait_timeout is None else wait_timeout):
+        raise RuntimeError(
+            f"waited {wait_timeout} s for another thread's GraphBLAS call with a Python op on "
+            "OBJECT (they run one at a time). A Python op that waits for another thread "
+            "running such a call never gets its turn; for a long call, raise "
+            "graphblas.core.operator.pyobject.wait_timeout (None waits forever)"
+        )
+    try:
         owner, _run_owner = _run_owner, threading.get_ident()
         # Only the suitesparse backend can ask for one thread (``_one_thread``)
         single = backend == "suitesparse" and (one or _asks_one_thread(args))
@@ -418,6 +436,8 @@ def run(call, cfunc_name, args, kind):
             _run_owner, _run_threads, _allow_zero = owner, threads, allow_zero
             _cshim.exit_call(saved[0])
             _numba_capi.exit_call(saved[1])
+    finally:
+        _run_lock.release()
     if error is not None:
         raise error
     return rv
