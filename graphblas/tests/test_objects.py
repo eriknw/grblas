@@ -1,4 +1,5 @@
 import gc
+import importlib.util
 import threading
 import weakref
 
@@ -82,7 +83,8 @@ def test_roundtrip(A, things):
     assert values[0] is None
     assert values[1] == (1, 2)
     assert values[2] == [3]
-    assert "Thing(5)" in repr(A)
+    if importlib.util.find_spec("pandas") is not None:  # the repr shows values with pandas
+        assert "Thing(5)" in repr(A)
 
 
 def test_elements(A, things):
