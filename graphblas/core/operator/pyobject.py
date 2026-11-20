@@ -68,6 +68,21 @@ _ANY = (Exception, BaseExceptionGroup, GeneratorExit, KeyboardInterrupt, SystemE
 # (``objects.has_empty_iso``), whose iso value SuiteSparse passes without using it
 _allow_zero = False
 _run_threads = 1  # threads the running call may use (1, or None for SuiteSparse's count)
+_in_cffi = threading.local()  # depth: this thread runs a function for a cffi callback
+
+
+def _marked(func):
+    """``func``, counting in ``_in_cffi`` while it runs (``run`` checks it)."""
+
+    def call(*args):
+        _in_cffi.depth = getattr(_in_cffi, "depth", 0) + 1
+        try:
+            return func(*args)
+        finally:
+            _in_cffi.depth -= 1
+
+    return call
+
 
 _SIGNATURES = {
     "UnaryOp": "GxB_unary_function",
@@ -106,6 +121,7 @@ def _reader(dtype):
 def _make_body(kind, func, dtype, dtype2, ret_type):
     """Return the Python function the cffi callback runs."""
     read_x = _reader(dtype)
+    func = _marked(func)
     is_bool = ret_type is BOOL
     intern = objects.intern_in_call
     in_x = dtype._is_object
@@ -364,10 +380,14 @@ def run(call, cfunc_name, args, kind):
         and (args[-1] is None or isinstance(args[-1], Descriptor))
     ):
         args = [*args[:-1], _one_thread(args[-1])]
-    if _run_owner is not None and (_run_threads != 1 or _run_owner != threading.get_ident()):
-        # A Python op inside a call that may run on several threads: the call holds
-        # _run_lock and the single error state, so a nested call could only wait for
-        # it (on a worker) or mix its errors with it
+    # A nested call: on a worker of a running call, it would wait forever for the
+    # _run_lock its call holds; on the call's own thread, it is fine unless other
+    # threads run the outer call's op meanwhile (one error state). Another Python
+    # thread's call just waits for its turn.
+    if (_run_owner == threading.get_ident() and _run_threads != 1) or (
+        _run_owner != threading.get_ident()
+        and (_cshim.in_callback() or getattr(_in_cffi, "depth", 0))
+    ):
         raise RuntimeError(
             "a Python op on OBJECT cannot run a GraphBLAS call with a Python op while its "
             "own call may use several threads; use nthreads=1 for the outer call"

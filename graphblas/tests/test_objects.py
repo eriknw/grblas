@@ -698,3 +698,25 @@ def test_subclass_takes_the_lock():
     v = MyVector.from_coo([0], [Thing("x")], dtype=OBJECT)
     assert type(v) is MyVector
     assert objects.touches_object([v])
+
+
+@pyops
+def test_python_op_calls_from_several_threads():
+    """Python-op calls in several Python threads at once take turns; none raises."""
+    add = binary.register_anonymous(lambda x, y: x + y, is_udt=True)
+    errors = []
+
+    def work(k):
+        try:
+            v = Vector.from_coo(range(1000), list(range(1000)), dtype=OBJECT)
+            for _ in range(20):
+                assert v.ewise_mult(v, add).new().get(999) == 1998
+        except Exception as exc:  # pragma: no cover (failure)
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(k,)) for k in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
