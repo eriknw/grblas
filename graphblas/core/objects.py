@@ -310,9 +310,26 @@ class _Heap:
         self._count(n)
         return handles
 
+    def claim_one(self):
+        """``claim`` for one slot, without numpy temporaries (the cffi trampolines' path)."""
+        if self.c is not None:
+            slot = self.c.claim_one()
+        else:
+            state = self.state
+            nfree = int(state[S_NFREE])
+            if nfree:
+                slot = int(self.free[nfree - 1])
+                state[S_NFREE] = nfree - 1
+            else:
+                slot = int(state[S_TOP])
+                state[S_TOP] = slot + 1
+        if slot >= len(self.objs) * _CHUNK:
+            self.add_chunks(slot + 1)
+        return slot
+
     def allocate_one(self, obj):
         """``allocate`` for one object."""
-        slot = int(self.claim(1)[0])
+        slot = self.claim_one()
         c, off = slot >> _CHUNK_BITS, slot & _OFF_MASK
         self.objs[c][off] = obj
         gens = self.gens[c]

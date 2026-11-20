@@ -494,6 +494,11 @@ class _CHeap:
             self.lib.heap_claim(n, self.ffi.cast("int64_t *", out.ctypes.data))
         return out
 
+    def claim_one(self):
+        out = self.ffi.new("int64_t[1]")
+        self.lib.heap_claim(1, out)
+        return out[0]
+
     def count(self, n):
         self.lib.heap_count(n)
 
