@@ -66,6 +66,8 @@ class DataType:
         return (t1.kind, t1.itemsize, t1.name) < (t2.kind, t2.itemsize, t2.name)
 
     def __reduce__(self):
+        if self._is_object:
+            return (lookup_dtype, ("OBJECT",))
         if self._is_udt:
             return (self._deserialize, (self.name, self.np_type, self._is_anonymous))
         if self.gb_name == "GrB_Index":

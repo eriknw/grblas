@@ -322,7 +322,8 @@ class Matrix(BaseType):
 
     def __reduce__(self):
         # TODO: we should probably use (or compare to) GraphBLAS serialize methods
-        if backend == "suitesparse":
+        # OBJECT pickles its objects, not their handles, which mean nothing elsewhere
+        if backend == "suitesparse" and not self.dtype._is_object:
             pieces = self.ss.export(raw=True)
         else:
             rows, cols, vals = self.to_coo(sort=False)
@@ -331,7 +332,7 @@ class Matrix(BaseType):
 
     @staticmethod
     def _deserialize(pieces, name):
-        if backend == "suitesparse":
+        if type(pieces) is dict:
             return Matrix.ss.import_any(name=name, **pieces)
         rows, cols, vals, dtype, nrows, ncols = pieces
         return Matrix.from_coo(rows, cols, vals, dtype, nrows=nrows, ncols=ncols, name=name)

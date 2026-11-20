@@ -283,3 +283,22 @@ def test_carrier_survives_collection():
     h = objects.to_handles([Thing("carried")]).view(np.uint8).view(objects.STORAGE)
     objects.collect()
     assert objects.to_objects(h)[0].label == "carried"
+
+
+def test_pickle(A, things):
+    """Pickling stores the objects, not their handles."""
+    import pickle
+
+    B = pickle.loads(pickle.dumps(A))
+    assert B.dtype is OBJECT
+    assert [x.label for x in B.to_coo()[2]] == [t.label for t in things]
+    v = pickle.loads(pickle.dumps(A.diag()))
+    assert [x.label for x in v.to_coo()[1]] == [0, 2, 5]
+    assert pickle.loads(pickle.dumps(OBJECT)) is OBJECT
+
+
+@pytest.mark.skipif("not suitesparse")
+def test_export_import(A):
+    """An export holds handles; importing them while the objects live gives the objects."""
+    B = Matrix.ss.import_any(**A.ss.export())
+    assert B.isequal(A)

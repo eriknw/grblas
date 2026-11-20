@@ -358,8 +358,8 @@ def to_handles(values, *, shape=None):
     dtype ``STORAGE`` (from ``ss.export``) is checked and passed through.
     """
     if isinstance(values, np.ndarray) and values.dtype == STORAGE:
-        with _lock:
-            _heap.slots_of(values.view(np.uint64).ravel())
+        # Not checked: the values of a bitmap export include garbage where there is
+        # no entry. A stale handle fails when it is resolved.
         return values
     if isinstance(values, np.ndarray) and values.dtype == object:
         objects = values.ravel()

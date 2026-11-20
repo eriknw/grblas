@@ -282,7 +282,8 @@ class Vector(BaseType):
 
     def __reduce__(self):
         # TODO: we should probably use (or compare to) GraphBLAS serialize methods
-        if backend == "suitesparse":
+        # OBJECT pickles its objects, not their handles, which mean nothing elsewhere
+        if backend == "suitesparse" and not self.dtype._is_object:
             pieces = self.ss.export(raw=True)
         else:
             indices, values = self.to_coo(sort=False)
@@ -291,7 +292,7 @@ class Vector(BaseType):
 
     @staticmethod
     def _deserialize(pieces, name):
-        if backend == "suitesparse":
+        if type(pieces) is dict:
             return Vector.ss.import_any(name=name, **pieces)
         indices, values, dtype, size = pieces
         return Vector.from_coo(indices, values, dtype, size=size, name=name)
