@@ -23,6 +23,9 @@ from graphblas.core import objects
 
 OBJECT = dtypes.OBJECT
 suitesparse = backend == "suitesparse"
+if not suitesparse and not supports_udfs:
+    # build needs a dup_op there, and ``any`` on a UDT needs Numba
+    pytestmark = pytest.mark.skip("OBJECT needs Numba on the vanilla backend")
 
 
 class Thing:
@@ -115,7 +118,8 @@ def test_structural(A, things):
     _, _, values = C.to_coo()
     assert _same(values, [things[0]] * 9)
     assert A.dup(mask=A.S).isequal(A)
-    assert A.apply(unary.identity).new().isequal(A)
+    if supports_udfs:  # identity on a UDT needs Numba
+        assert A.apply(unary.identity).new().isequal(A)
     assert A.mxm(A, semiring.any_pair).new().dtype == dtypes.INT64
     v = A.diag()
     assert _same(v.to_coo()[1], [things[0], things[2], things[5]])
