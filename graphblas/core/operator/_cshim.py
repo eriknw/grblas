@@ -171,6 +171,14 @@ static void report_error(void)
     }
 }
 
+/* SuiteSparse calls an op on the iso values of empty iso inputs, which may be 0
+   (never filled). The result is discarded, so such a call is skipped: no error. */
+static int skip(tramp_ctx *c, const void *x, const void *y)
+{
+    return (c->kx == K_HANDLE && *(const uint64_t *) x == 0)
+        || (y != NULL && c->ky == K_HANDLE && *(const uint64_t *) y == 0);
+}
+
 /* The object of a handle, as a new reference; NULL (error reported) unless live */
 static PyObject *get_handle(uint64_t h)
 {
@@ -262,7 +270,7 @@ static void unary_impl(tramp_ctx *c, void *z, const void *x)
     PyGILState_STATE g = ensure_gil();
     uint64_t out = 0;
     PyObject *a = NULL;
-    if (__atomic_load_n(&HEAP.errflag, __ATOMIC_RELAXED)) goto done;
+    if (__atomic_load_n(&HEAP.errflag, __ATOMIC_RELAXED) || skip(c, x, NULL)) goto done;
     a = get_value(c->kx, x);
     if (a == NULL) goto done;
     PyObject *r = PyObject_Vectorcall((PyObject *) c->func, &a, 1, NULL);
@@ -280,7 +288,7 @@ static void binary_impl(tramp_ctx *c, void *z, const void *x, const void *y)
     PyGILState_STATE g = ensure_gil();
     uint64_t out = 0;
     PyObject *args[2] = {NULL, NULL};
-    if (__atomic_load_n(&HEAP.errflag, __ATOMIC_RELAXED)) goto done;
+    if (__atomic_load_n(&HEAP.errflag, __ATOMIC_RELAXED) || skip(c, x, y)) goto done;
     args[0] = get_value(c->kx, x);
     if (args[0] == NULL) goto done;
     args[1] = get_value(c->ky, y);
@@ -305,7 +313,7 @@ static void indexunary_impl(tramp_ctx *c, void *z, const void *x, uint64_t i, ui
     uint64_t out = 0;
     int truth = 0;
     PyObject *args[4] = {NULL, NULL, NULL, NULL};
-    if (__atomic_load_n(&HEAP.errflag, __ATOMIC_RELAXED)) goto done;
+    if (__atomic_load_n(&HEAP.errflag, __ATOMIC_RELAXED) || skip(c, x, y)) goto done;
     args[0] = get_value(c->kx, x);
     if (args[0] == NULL) goto done;
     args[3] = get_value(c->ky, y);

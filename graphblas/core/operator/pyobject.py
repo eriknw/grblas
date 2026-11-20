@@ -51,13 +51,20 @@ _SIGNATURES = {
 }
 
 
+class _Skip(Exception):
+    """Handle 0, the iso value of an empty iso input: the call is skipped (``_cshim.skip``)."""
+
+
 def _reader(dtype):
     """Return ``read(void_ptr) -> value`` for an input of type ``dtype``."""
     if dtype._is_object:
         resolve = objects.resolve_in_call
 
         def read(ptr):
-            return resolve(ffi.cast("uint64_t*", ptr)[0])
+            handle = ffi.cast("uint64_t*", ptr)[0]
+            if handle == 0:
+                raise _Skip
+            return resolve(handle)
 
         return read
     if dtype._is_udt:
@@ -97,6 +104,8 @@ def _make_body(kind, func, dtype, dtype2, ret_type):
                 else:
                     h = intern(r)
                 ffi.cast("uint64_t*", z)[0] = h
+            except _Skip:
+                ffi.cast("uint64_t*", z)[0] = 0
             except (Exception, KeyboardInterrupt) as exc:  # ``run`` raises it
                 _error = exc
                 ffi.cast("uint64_t*", z)[0] = 0
@@ -113,6 +122,8 @@ def _make_body(kind, func, dtype, dtype2, ret_type):
                 r = func(a)
                 h = ffi.cast("uint64_t*", x)[0] if in_x and r is a else intern(r)
                 ffi.cast("uint64_t*", z)[0] = h
+            except _Skip:
+                ffi.cast("uint64_t*", z)[0] = 0
             except (Exception, KeyboardInterrupt) as exc:  # ``run`` raises it
                 _error = exc
                 ffi.cast("uint64_t*", z)[0] = 0
@@ -129,6 +140,8 @@ def _make_body(kind, func, dtype, dtype2, ret_type):
                     return
                 try:
                     ffi.cast("bool*", z)[0] = bool(func(read_x(x), i, j, read_y(y)))
+                except _Skip:
+                    ffi.cast("bool*", z)[0] = False
                 except (Exception, KeyboardInterrupt) as exc:  # ``run`` raises it
                     _error = exc
                     ffi.cast("bool*", z)[0] = False
@@ -145,6 +158,8 @@ def _make_body(kind, func, dtype, dtype2, ret_type):
                     r = func(a, i, j, read_y(y))
                     h = ffi.cast("uint64_t*", x)[0] if in_x and r is a else intern(r)
                     ffi.cast("uint64_t*", z)[0] = h
+                except _Skip:
+                    ffi.cast("uint64_t*", z)[0] = 0
                 except (Exception, KeyboardInterrupt) as exc:  # ``run`` raises it
                     _error = exc
                     ffi.cast("uint64_t*", z)[0] = 0
