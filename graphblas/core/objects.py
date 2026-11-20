@@ -69,7 +69,8 @@ class _OpLock:
     Invariants (each needed for a collection to be sound):
 
     1. A collection marks and sweeps only while it holds the lock exclusively,
-       so no GraphBLAS call, intern or resolve runs during it, in any thread.
+       so no intern, resolve or GraphBLAS call on an OBJECT container (as
+       output, input or mask; ``touches_object``) runs during it, in any thread.
        GraphBLAS finishes pending work when the collector extracts values, and
        that must not race with a call on the same object.
     2. Every handle not stored in a tracked container is held by a tracked
@@ -373,10 +374,51 @@ def _stored_handles(container):
 # Hooks
 
 
+def touches_object(args):
+    """Whether any of ``call``'s arguments is, or wraps, an OBJECT container.
+
+    A call on other containers cannot race with a collection, which reads only
+    OBJECT containers, so it skips the lock. Dispatch is on the exact type, as
+    ``getattr`` with a default costs too much on the many arguments without one.
+    """
+    for x in args:
+        kind = _arg_kinds.get(type(x))
+        if kind is None:
+            continue
+        if kind == 1:  # _Pointer
+            x = x.val
+            if type(x) not in _arg_kinds:
+                continue
+        elif kind == 2:  # Mask
+            x = x.parent
+        if x.dtype._is_object:
+            return True
+    return False
+
+
+# type -> 0 (has ``dtype``), 1 (``_Pointer``) or 2 (mask), filled by ``track``
+_arg_kinds = {}
+
+
+def _fill_arg_kinds():
+    from .mask import Mask
+    from .matrix import Matrix, TransposedMatrix
+    from .scalar import Scalar
+    from .utils import _CArray, _Pointer
+    from .vector import Vector
+
+    kinds = dict.fromkeys((Matrix, TransposedMatrix, Vector, Scalar, _CArray), 0)
+    kinds[_Pointer] = 1
+    kinds.update((cls, 2) for cls in Mask.__subclasses__())
+    _arg_kinds.update(kinds)
+
+
 def track(container):
     """Register a new OBJECT Matrix, Vector or Scalar, so the collector marks its values."""
     global active
-    active = True
+    if not active:
+        _fill_arg_kinds()
+        active = True
     _register(_heap.containers, container)
 
 

@@ -27,8 +27,8 @@ def _is_recording():
 
 
 def call(cfunc_name, args):
-    if objects.active:
-        # No collection while GraphBLAS runs: see ``objects._OpLock``
+    if objects.active and objects.touches_object(args):
+        # No collection while GraphBLAS uses an OBJECT container: see ``objects._OpLock``
         objects._lock.acquire_shared()
         try:
             return _call(cfunc_name, args)
