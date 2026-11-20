@@ -8,13 +8,19 @@ function, and writes the handle of the result (or a bool, for a SelectOp).
 Monoids and semirings built from such a BinaryOp then work too, so ``mxm``,
 ``reduce`` and the rest run the Python function inside SuiteSparse's kernels.
 
-The trampoline here is a cffi callback, which needs neither a C compiler nor
-Numba. cffi callbacks take the GIL per call and do not scale across threads,
-so every call that runs a Python op asks SuiteSparse for one thread (``run``).
+The trampoline is C code (``_cshim``, about 50 ns a call) when a C compiler can
+build it, and otherwise a cffi callback (here, about 30 times slower), which
+needs neither a compiler nor Numba. With the GIL, or with a cffi callback, a
+call that runs a Python op asks SuiteSparse for one thread (``run``).
 
 A result that ``is`` one of the inputs reuses that input's handle, so ``min``
 and the like return a stored object without allocating, and a monoid's
-terminal value can be recognized.
+terminal value can be recognized. Other results get new handles: one object
+may have several (``objects.isequal``).
+
+SuiteSparse also calls an op on the iso values of empty iso inputs and
+discards the result. Such a value may be handle 0 (never filled), and then
+the function is not called.
 
 Errors: the first exception in a call is kept, the function is not called
 again in that call (each later element gets handle 0), and ``run`` raises it
