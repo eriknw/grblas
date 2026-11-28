@@ -1003,8 +1003,23 @@ class Vector(BaseType):
 
         """
         if (nan_free := _nan_free(values, missing_value, dtype, 1)) is not None:
-            values, (indices,) = nan_free
-            return cls.from_coo(indices, values[indices], dtype, size=values.size, name=name)
+            values, keep = nan_free  # see Matrix.from_dense
+            if keep is None:
+                missing_value = None  # no bool or integer value is NaN
+            elif backend == "suitesparse":
+                filled = np.where(keep, values, 0)
+                return cls.ss.import_bitmap(
+                    bitmap=keep,
+                    values=filled,
+                    size=values.size,
+                    dtype=dtype,
+                    take_ownership=True,
+                    name=name,
+                    **opts,
+                )
+            else:
+                indices = np.flatnonzero(keep)
+                return cls.from_coo(indices, values[indices], dtype, size=values.size, name=name)
         values, dtype = values_to_numpy_buffer(values, dtype, subarray_after=1)
         if values.ndim == 0:
             raise TypeError(

@@ -230,31 +230,35 @@ def values_to_numpy_buffer(
 
 
 def _is_nan(x):
-    """Whether ``x`` is a float or complex NaN, or a Scalar that holds one."""
-    from .scalar import Scalar  # scalar.py imports this module
-
-    if isinstance(x, Scalar):
+    """Whether ``x`` is a float or complex NaN, as a number, a 0-d array or a Scalar."""
+    if getattr(x, "_is_scalar", False):
         x = x.value
+    elif isinstance(x, np.ndarray) and x.ndim == 0:
+        x = x[()]
     return isinstance(x, (float, complex, np.floating, np.complexfloating)) and bool(np.isnan(x))
 
 
 def _nan_free(values, missing_value, dtype, ndim):
-    """Return the values as an array and the indices of those not NaN, for ``from_dense``.
+    """Return the values as an array and a mask of those not NaN, for ``from_dense``.
 
-    ``from_dense`` leaves out the values equal to ``missing_value``, and NaN is never equal to
-    NaN, so a NaN ``missing_value`` needs the positions found here instead. They are found in
-    the values as given, before a cast to ``dtype`` (a NaN cast to bool is True). Return None
-    if ``missing_value`` is not NaN, or the values are not a float or complex array of ``ndim``
-    dimensions for a dtype without a sub-array shape (an integer array has no NaN).
+    ``from_dense`` leaves out the values equal to ``missing_value``. NaN never equals NaN, so a
+    NaN ``missing_value`` leaves out the values where this mask is False instead. The mask comes
+    from the values as given, before the cast to ``dtype``: a NaN cast to bool is True.
+
+    Return None when ``missing_value`` is not NaN, the values do not have ``ndim`` dimensions,
+    or ``dtype`` has a sub-array shape; ``from_dense`` then goes on as usual. The mask is None
+    for bool and integer values, which hold no NaN.
     """
     if missing_value is None or not _is_nan(missing_value):
         return None
     values = np.asarray(values)
-    if values.dtype.kind not in "fc" or values.ndim != ndim:
+    if values.ndim != ndim or values.dtype.kind not in "biufc":
         return None
     if dtype is not None and lookup_dtype(dtype).np_type.subdtype is not None:
         return None
-    return values, np.nonzero(~np.isnan(values))
+    if values.dtype.kind in "biu":
+        return values, None
+    return values, ~np.isnan(values)
 
 
 def check_element_shape(values, dtype, ndim):

@@ -1620,11 +1620,29 @@ class Matrix(BaseType):
 
         """
         if (nan_free := _nan_free(values, missing_value, dtype, 2)) is not None:
-            values, (rows, cols) = nan_free
-            nrows, ncols = values.shape
-            return cls.from_coo(
-                rows, cols, values[rows, cols], dtype, nrows=nrows, ncols=ncols, name=name
-            )
+            values, keep = nan_free
+            if keep is None:
+                missing_value = None  # no bool or integer value is NaN
+            elif backend == "suitesparse":
+                # Zero the NaNs before the cast to dtype; the bitmap leaves them out
+                nrows, ncols = values.shape
+                filled = np.where(keep, values, 0)
+                return cls.ss.import_bitmapr(
+                    bitmap=keep,
+                    values=filled,
+                    nrows=nrows,
+                    ncols=ncols,
+                    dtype=dtype,
+                    take_ownership=True,
+                    name=name,
+                    **opts,
+                )
+            else:
+                nrows, ncols = values.shape
+                indptr = np.zeros(nrows + 1, np.uint64)
+                np.cumsum(keep.sum(axis=1), out=indptr[1:])
+                cols = np.broadcast_to(np.arange(ncols, dtype=np.uint64), values.shape)[keep]
+                return cls.from_csr(indptr, cols, values[keep], dtype, ncols=ncols, name=name)
         values, dtype = values_to_numpy_buffer(values, dtype, subarray_after=2)
         if values.ndim == 0:
             raise TypeError(

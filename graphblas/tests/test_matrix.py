@@ -4577,11 +4577,11 @@ def test_to_dense_from_dense():
 
 @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128])
 def test_from_dense_nan_missing_value(dtype):
-    """A NaN ``missing_value``, as a float, complex or Scalar, leaves the NaN positions missing.
+    """A NaN ``missing_value`` (a number, a 0-d array or a Scalar) leaves the NaNs missing.
 
     Another ``missing_value`` is found by comparing with it, which would keep every NaN, since
-    NaN is never equal to NaN. The NaNs are found before a cast to ``dtype``, as for a Tensor,
-    and an integer array keeps every position.
+    NaN is never equal to NaN. The NaNs are found before a cast to ``dtype``, and an integer
+    array keeps every position.
     """
     if np.dtype(dtype).kind == "c" and not dtypes._supports_complex and not supports_udfs:
         pytest.skip("vanilla builds from complex entries (a UDT) only with Numba")
@@ -4592,6 +4592,7 @@ def test_from_dense_nan_missing_value(dtype):
     nans = [np.nan, float("nan"), np.float32("nan"), complex("nan"), Scalar.from_value(np.nan)]
     nans.append(Scalar.from_value(np.float32("nan"), dtype=dtypes.FP32, is_cscalar=False))
     nans.append(Scalar.from_value(complex("nan")))
+    nans.extend([np.array(np.nan), np.array(np.float32("nan"))])
     for nan in nans:
         A = Matrix.from_dense(x, missing_value=nan)
         assert A.isequal(
@@ -4603,7 +4604,8 @@ def test_from_dense_nan_missing_value(dtype):
             expected, check_dtype=True
         )
     ints = rng.integers(0, 5, (3, 4))
-    assert Matrix.from_dense(ints, missing_value=np.nan).nvals == ints.size
+    for nan in [np.nan, np.float16("nan")]:
+        assert Matrix.from_dense(ints, missing_value=nan).nvals == ints.size
 
 
 @pytest.mark.skipif("not suitesparse")
