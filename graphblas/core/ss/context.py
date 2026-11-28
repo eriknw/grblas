@@ -15,6 +15,8 @@ class Context(BaseConfig):
 
     .. code-block:: python
 
+        import graphblas as gb
+
         A = gb.Matrix.from_coo([0, 1], [1, 0], [1.0, 2.0])
         with gb.ss.Context(nthreads=4):
             C = (A @ A).new()
@@ -32,7 +34,8 @@ class Context(BaseConfig):
         setting, ``gb.ss.config["nthreads"]``.
     chunk : double
         The least work to give each thread, so a small problem runs on fewer threads
-        (``floor(work / chunk)``, at most ``nthreads``). Below 1 means the default, 65536.
+        (``floor(work / chunk)``, at most ``nthreads``). Below 1 means SuiteSparse's
+        default, 65536.
     gpu_id : int
         Only for SuiteSparse:GraphBLAS 10.1 and earlier; see ``gb.ss.config``.
     """
