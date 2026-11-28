@@ -13,7 +13,8 @@ def from_pydata_sparse(s, *, dup_op=None, name=None):
     Parameters
     ----------
     s : sparse
-        PyData sparse array or matrix (see https://sparse.pydata.org)
+        PyData sparse array or matrix (see https://sparse.pydata.org). Its fill value
+        must be 0, since GraphBLAS has no fill value.
     dup_op : BinaryOp, optional
         Combines the values of an index repeated within a row (or column) of a
         two-dimensional gcxs array. By default they are summed, as pydata's todense does.
@@ -38,6 +39,12 @@ def from_pydata_sparse(s, *, dup_op=None, name=None):
         )
     if s.ndim > 2:
         raise GraphblasException("m.ndim must be <= 2")
+    if not s.fill_value == 0:
+        raise ValueError(
+            f"from_pydata_sparse needs a fill value of 0; got {s.fill_value!r}. GraphBLAS has "
+            "no fill value (a missing entry has no value), so another fill value would be "
+            "lost. To import only the stored entries, rebuild the array with fill_value=0."
+        )
 
     if s.ndim == 1:
         # the .asformat('coo') makes it easier to convert dok/gcxs using a single approach

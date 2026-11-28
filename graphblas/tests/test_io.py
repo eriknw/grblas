@@ -647,6 +647,30 @@ def test_matrix_to_from_pydata_sparse():
 
 @pytest.mark.skipif("not sparse")
 @pytest.mark.slow
+def test_from_pydata_sparse_fill_value():
+    """An array whose fill value is not 0 raises, since GraphBLAS has no fill value.
+
+    This catches an import that keeps only the stored entries and drops the fill value.
+    """
+    coords = np.array([[0, 1], [0, 1]])
+    for s in [
+        sparse.COO(coords, [5.0, 6.0], shape=(2, 2), fill_value=1.0),
+        sparse.COO(coords[:1], [5.0, 6.0], shape=(3,), fill_value=np.nan),
+        sparse.COO(coords, [False, False], shape=(2, 2), fill_value=True),
+        sparse.DOK.from_coo(sparse.COO(coords, [5, 6], shape=(2, 2), fill_value=2)),
+        sparse.GCXS.from_coo(sparse.COO(coords, [5.0, 6.0], shape=(2, 2), fill_value=1.0)),
+    ]:
+        with pytest.raises(ValueError, match="needs a fill value of 0; got"):
+            gb.io.from_pydata_sparse(s)
+    # A fill value equal to 0 is no value
+    for fill_value, data in [(0.0, [5.0, 6.0]), (-0.0, [5.0, 6.0]), (False, [True, True])]:
+        s = sparse.COO(coords, data, shape=(2, 2), fill_value=fill_value)
+        A = gb.io.from_pydata_sparse(s)
+        assert A.isequal(gb.Matrix.from_coo(*coords, data, nrows=2, ncols=2), check_dtype=True)
+
+
+@pytest.mark.skipif("not sparse")
+@pytest.mark.slow
 @pytest.mark.parametrize("axis", [0, 1])
 @pytest.mark.parametrize("dtype", ["int64", "float64", "bool"])
 def test_from_pydata_sparse_gcxs_duplicates(axis, dtype):
