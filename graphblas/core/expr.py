@@ -260,7 +260,8 @@ class IndexerResolver:
                 raise TypeError(
                     f"Invalid type for index: {typ}; unable to convert to list"
                 ) from None
-        # np.array([]) is float64, but an empty list selects nothing, as in numpy
+        # Any empty iterable index ([], range(0), an empty generator) selects nothing.
+        # np.array([]) is float64, which the ndarray branch would reject.
         array = np.array(index) if index else np.empty(0, np.int64)
         return self.parse_index(array, np.ndarray, size)
 

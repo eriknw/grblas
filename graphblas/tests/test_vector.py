@@ -480,12 +480,15 @@ def test_extract(v):
     assert w2.isequal(w)
 
 
-def test_extract_assign_empty_list(v):
-    """An empty list index selects nothing, as an empty integer array does and as in numpy.
+def test_extract_assign_empty_index(v):
+    """An empty list, range or generator index selects nothing, as an empty integer array does.
 
-    ``np.array([])`` is float64, so the index check rejected an empty list.
+    For a list, the shape is numpy's. This catches an empty index that becomes a float64
+    array, which the dtype check rejects.
     """
     assert v[[]].new().isequal(Vector(v.dtype, 0))
+    assert v[range(0)].new().isequal(Vector(v.dtype, 0))
+    assert v[(i for i in [])].new().isequal(Vector(v.dtype, 0))
     w = v.dup()
     w[[]] = 100
     w[[]] << Vector(v.dtype, 0)
