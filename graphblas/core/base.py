@@ -2,7 +2,7 @@ from contextvars import ContextVar
 
 from .. import backend, config
 from .. import replace as replace_singleton
-from ..exceptions import check_status
+from ..exceptions import NotImplementedException, check_status
 from . import NULL
 from .descriptor import lookup as descriptor_lookup
 from .expr import AmbiguousAssignOrExtract, Updater
@@ -548,7 +548,20 @@ class BaseType:
         args.extend(expr.args)
         args.append(desc)
         # Make the GraphBLAS call
-        call(cfunc_name, args)
+        try:
+            call(cfunc_name, args)
+        except NotImplementedException:
+            if cfunc_name != "GrB_Matrix_reduce_BinaryOp":
+                raise
+            # SuiteSparse returns GrB_NOT_IMPLEMENTED with no error text. It accepts the
+            # BinaryOps it matches to a Monoid, which include some that ``op.monoid`` does not
+            # name (BOOL iseq), so this is checked here and not when the expression is built.
+            raise NotImplementedException(
+                f"{expr.method_name} with {expr.op} is not implemented: SuiteSparse:GraphBLAS "
+                "reduces a Matrix to a Vector only with a Monoid, or with a BinaryOp it treats "
+                f"as one, and {expr.op} is neither. Use a Monoid, such as monoid.plus, or an "
+                "Aggregator, such as agg.first."
+            ) from None
         if self._is_scalar:
             if expr._scalar_as_vector:
                 if self._is_cscalar or backend != "suitesparse":

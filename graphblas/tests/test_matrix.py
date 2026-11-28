@@ -1946,6 +1946,24 @@ def test_reduce_row_udf(A):
     assert w2.isequal(result)
 
 
+def test_reduce_rowwise_columnwise_binaryop_without_monoid(A):
+    """A rowwise or columnwise reduce with a BinaryOp that has no Monoid says what to use.
+
+    SuiteSparse returns GrB_NOT_IMPLEMENTED with no error text. It still accepts the BOOL ops
+    it matches to a Monoid of its own, so those keep working.
+    """
+    for reduce in [A.reduce_rowwise, A.reduce_columnwise, A.T.reduce_rowwise]:
+        with pytest.raises(NotImplementedException, match=r"binary\.first.*agg\.first"):
+            reduce(binary.first).new()
+    w = Vector(A.dtype, 7)
+    with pytest.raises(NotImplementedException, match="Use a Monoid"):
+        w << A.reduce_columnwise(binary.minus)
+    B = Matrix.from_coo([0, 0, 1], [0, 1, 1], [True, False, True])
+    assert binary.iseq["BOOL"].monoid is None
+    expected = Vector.from_coo([0, 1], [False, True])
+    assert B.reduce_rowwise(binary.iseq).new().isequal(expected, check_dtype=True)
+
+
 def test_reduce_column(A):
     result = Vector.from_coo([0, 1, 2, 3, 4, 5, 6], [3, 2, 9, 10, 11, 8, 4])
     w = A.reduce_columnwise(monoid.plus).new()
