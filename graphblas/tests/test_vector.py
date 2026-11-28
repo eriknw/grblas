@@ -3459,8 +3459,8 @@ def test_ss_import_values_size():
 def test_vector_repr_coo_form():
     """A Vector sparse enough for the COO form shows its first entries on every backend.
 
-    The COO form read ``ss.head``, which the vanilla backend lacks. The header, which names
-    the format only on suitesparse, is left out of the comparison.
+    The vanilla backend has no ``ss.head``, so this catches a COO form that calls it. The
+    comparison skips the header, which names the format only on suitesparse.
     """
     pd = pytest.importorskip("pandas")
     v = Vector.from_coo([300, 500, 100, 700, 900], [1, 2, 3, 4, 5], size=1000)

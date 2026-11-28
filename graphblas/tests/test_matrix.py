@@ -5429,8 +5429,8 @@ def test_matrix_subclass_repr():
 def test_matrix_repr_coo_form():
     """A Matrix sparse enough for the COO form shows its first entries on every backend.
 
-    The COO form read ``ss.head``, which the vanilla backend lacks. The header, which names
-    the format only on suitesparse, is left out of the comparison.
+    The vanilla backend has no ``ss.head``, so this catches a COO form that calls it. The
+    comparison skips the header, which names the format only on suitesparse.
     """
     pd = pytest.importorskip("pandas")
     A = Matrix.from_coo(
