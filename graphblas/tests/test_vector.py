@@ -3269,7 +3269,7 @@ def test_to_dense_from_dense():
 
 @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128])
 def test_from_dense_nan_missing_value(dtype):
-    """``from_dense(values, missing_value=np.nan)`` leaves the NaN positions missing.
+    """A NaN ``missing_value``, as a float, complex or Scalar, leaves the NaN positions missing.
 
     Another ``missing_value`` is found by comparing with it, which would keep every NaN, since
     NaN is never equal to NaN. The NaNs are found before a cast to ``dtype``, as for a Tensor,
@@ -3281,7 +3281,10 @@ def test_from_dense_nan_missing_value(dtype):
     x = rng.random(20).astype(dtype)
     x[rng.random(x.shape) < 0.4] = np.nan
     (indices,) = np.nonzero(~np.isnan(x))
-    for nan in [np.nan, float("nan"), np.float32("nan"), complex("nan")]:
+    nans = [np.nan, float("nan"), np.float32("nan"), complex("nan"), Scalar.from_value(np.nan)]
+    nans.append(Scalar.from_value(np.float32("nan"), dtype=dtypes.FP32, is_cscalar=False))
+    nans.append(Scalar.from_value(complex("nan")))
+    for nan in nans:
         v = Vector.from_dense(x, missing_value=nan)
         assert v.isequal(Vector.from_coo(indices, x[indices], size=20), check_dtype=True)
     for to in [np.complex64 if np.dtype(dtype).kind == "c" else np.float32, bool]:

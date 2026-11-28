@@ -230,7 +230,11 @@ def values_to_numpy_buffer(
 
 
 def _is_nan(x):
-    """Whether ``x`` is a float or complex NaN."""
+    """Whether ``x`` is a float or complex NaN, or a Scalar that holds one."""
+    from .scalar import Scalar  # scalar.py imports this module
+
+    if isinstance(x, Scalar):
+        x = x.value
     return isinstance(x, (float, complex, np.floating, np.complexfloating)) and bool(np.isnan(x))
 
 
@@ -243,7 +247,7 @@ def _nan_free(values, missing_value, dtype, ndim):
     if ``missing_value`` is not NaN, or the values are not a float or complex array of ``ndim``
     dimensions for a dtype without a sub-array shape (an integer array has no NaN).
     """
-    if not _is_nan(missing_value):
+    if missing_value is None or not _is_nan(missing_value):
         return None
     values = np.asarray(values)
     if values.dtype.kind not in "fc" or values.ndim != ndim:
