@@ -39,6 +39,7 @@ from .udt import (
 )
 from .utils import (
     _CArray,
+    _nan_free,
     _Pointer,
     check_element_shape,
     class_property,
@@ -980,6 +981,7 @@ class Vector(BaseType):
             List of values.
         missing_value : scalar, optional
             A scalar value to consider "missing"; elements of this value will be dropped.
+            A NaN ``missing_value`` drops the NaNs.
             If None, then the resulting Vector will be dense.
         dtype : DataType, optional
             Data type of the Vector. If not provided, the values will be inspected
@@ -1000,6 +1002,9 @@ class Vector(BaseType):
         Vector
 
         """
+        if (nan_free := _nan_free(values, missing_value, dtype, 1)) is not None:
+            values, (indices,) = nan_free
+            return cls.from_coo(indices, values[indices], dtype, size=values.size, name=name)
         values, dtype = values_to_numpy_buffer(values, dtype, subarray_after=1)
         if values.ndim == 0:
             raise TypeError(

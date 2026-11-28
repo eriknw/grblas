@@ -49,6 +49,7 @@ from .udt import (
 )
 from .utils import (
     _CArray,
+    _nan_free,
     _Pointer,
     check_element_shape,
     class_property,
@@ -1598,6 +1599,7 @@ class Matrix(BaseType):
             List of values.
         missing_value : scalar, optional
             A scalar value to consider "missing"; elements of this value will be dropped.
+            A NaN ``missing_value`` drops the NaNs.
             If None, then the resulting Matrix will be dense.
         dtype : DataType, optional
             Data type of the Matrix. If not provided, the values will be inspected
@@ -1617,6 +1619,12 @@ class Matrix(BaseType):
         Matrix
 
         """
+        if (nan_free := _nan_free(values, missing_value, dtype, 2)) is not None:
+            values, (rows, cols) = nan_free
+            nrows, ncols = values.shape
+            return cls.from_coo(
+                rows, cols, values[rows, cols], dtype, nrows=nrows, ncols=ncols, name=name
+            )
         values, dtype = values_to_numpy_buffer(values, dtype, subarray_after=2)
         if values.ndim == 0:
             raise TypeError(
