@@ -41,9 +41,9 @@ def from_pydata_sparse(s, *, dup_op=None, name=None):
         raise GraphblasException("m.ndim must be <= 2")
     if not s.fill_value == 0:
         raise ValueError(
-            f"from_pydata_sparse needs a fill value of 0; got {s.fill_value!r}. GraphBLAS has "
-            "no fill value (a missing entry has no value), so another fill value would be "
-            "lost. To import only the stored entries, rebuild the array with fill_value=0."
+            f"from_pydata_sparse needs a fill value of 0; got {s.fill_value}. GraphBLAS has "
+            "no fill value, so another fill value would be lost. To import only the stored "
+            "entries, rebuild the array with fill_value=0."
         )
 
     if s.ndim == 1:
