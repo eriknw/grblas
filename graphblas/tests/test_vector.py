@@ -1151,6 +1151,26 @@ def test_reduce_agg_empty_iso():
                 assert compute(M.reduce_scalar(aggr).new().value) is None
 
 
+def test_vxm_inner_empty_inner_iso():
+    """``v @ A`` and ``v @ w`` over a size of 0 give no entries for iso operands.
+
+    SuiteSparse returns an entry per output position there when the operands are iso, so this
+    catches a lost workaround.
+    """
+    v = Vector("UINT8", size=0)
+    v[...] = 5
+    A = Matrix("UINT8", nrows=0, ncols=4)
+    A[...] = 5
+    assert v.vxm(A).new().isequal(Vector("UINT8", 4))
+    assert (v @ A).new().isequal(Vector("UINT8", 4))
+    assert (v @ A.T.T).new().isequal(Vector("UINT8", 4))
+    assert v.inner(v).new().is_empty
+    assert (v @ v).new().is_empty
+    w = Vector.from_coo([0], [7], dtype="UINT8", size=4)
+    w(binary.plus) << v @ A
+    assert w.isequal(Vector.from_coo([0], [7], dtype="UINT8", size=4))
+
+
 def test_reduce_agg_vector_apply():
     """The aggregators that reduce a Vector with an apply and then a reduce match numpy.
 

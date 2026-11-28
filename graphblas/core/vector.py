@@ -1465,6 +1465,8 @@ class Vector(BaseType):
             )
             op = get_typed_op(op, self.dtype, other.dtype, kind="semiring")
             self._expect_op(op, "Semiring", within=method_name, argname="op")
+        if self._size == 0:
+            self = Vector(self.dtype, 0, name=self.name)  # see matrix._empty_like
 
         expr = VectorExpression(
             method_name,
@@ -1843,6 +1845,8 @@ class Vector(BaseType):
             other = self._expect_type(other, Vector, within=method_name, argname="other", op=op)
             op = get_typed_op(op, self.dtype, other.dtype, kind="semiring")
             self._expect_op(op, "Semiring", within=method_name, argname="op")
+        if self._size == 0:
+            self = Vector(self.dtype, 0, name=self.name)  # see matrix._empty_like
 
         expr = ScalarExpression(
             method_name,

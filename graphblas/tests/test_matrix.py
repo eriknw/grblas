@@ -1900,6 +1900,41 @@ def test_reduce_agg_empty():
                         assert t.is_empty
 
 
+def test_reduce_mxm_mxv_empty_inner_iso():
+    """Reducing or multiplying over a dimension of size 0 gives no entries for iso operands.
+
+    SuiteSparse returns an entry per output position there when the operands are iso, so this
+    catches a lost workaround. Accumulating the empty result leaves the output alone.
+    """
+    A = Matrix("UINT8", nrows=3, ncols=0)
+    A[...] = 5
+    B = Matrix("UINT8", nrows=0, ncols=4)
+    B[...] = 5
+    v = Vector("UINT8", size=0)
+    v[...] = 5
+    if suitesparse:
+        assert all(x.ss.is_iso for x in [A, B, v])
+    aggs = [aggr for _, aggr in op_items(agg) if isinstance(aggr, agg.Aggregator)]
+    for M, rowwise in [(A, True), (A.T, False), (B, False), (B.T, True)]:
+        reduce = M.reduce_rowwise if rowwise else M.reduce_columnwise
+        size = M.nrows if rowwise else M.ncols
+        for op in [monoid.plus, binary.max, *aggs]:
+            w = reduce(op).new()
+            assert w.size == size
+            assert w.nvals == 0
+    assert A.mxv(v).new().isequal(Vector("UINT8", 3))
+    assert (A @ v).new().isequal(Vector("UINT8", 3))
+    assert (A @ B).new().isequal(Matrix("UINT8", 3, 4))
+    assert semiring.min_plus(B.T @ A.T).new().isequal(Matrix("UINT8", 4, 3))
+    w = Vector.from_coo([0], [7], dtype="UINT8", size=3)
+    w(binary.plus) << A.reduce_rowwise(monoid.plus)
+    w(binary.plus) << A @ v
+    assert w.isequal(Vector.from_coo([0], [7], dtype="UINT8", size=3))
+    C = Matrix.from_coo([0], [0], [10], dtype="UINT8", nrows=3, ncols=4)
+    C(binary.plus) << A @ B
+    assert C.isequal(Matrix.from_coo([0], [0], [10], dtype="UINT8", nrows=3, ncols=4))
+
+
 def test_reduce_scalar_agg_count_exists(A):
     """``agg.count`` and ``agg.exists`` on a whole Matrix store like any other reduce.
 

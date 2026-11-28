@@ -125,6 +125,18 @@ def _reposition(updater, indices, chunk):
     updater[indices] = chunk
 
 
+def _empty_like(A):
+    """Return a new empty Matrix with the shape and dtype of ``A``, to use in its place.
+
+    Callers use it when the dimension they reduce or multiply over has size 0, so the result
+    has no entries. SuiteSparse:GraphBLAS (checked through 10.5.3) gives an entry per output
+    position there when the operands are iso, such as a Matrix with a 0 dimension after
+    ``A[...] = 5``. A new Matrix is not iso. It takes the name of ``A``, so the expression
+    shows the operand the user gave. Other calls pay only for the check of the size.
+    """
+    return Matrix(A.dtype, A._nrows, A._ncols, name=A.name)
+
+
 def _power(updater, A, n, op):
     opts = updater.opts
 
@@ -2414,6 +2426,8 @@ class Matrix(BaseType):
             other = self._expect_type(other, Vector, within=method_name, argname="other", op=op)
             op = get_typed_op(op, self.dtype, other.dtype, kind="semiring")
             self._expect_op(op, "Semiring", within=method_name, argname="op")
+        if self._ncols == 0:
+            self = _empty_like(self)
 
         expr = VectorExpression(
             method_name,
@@ -2481,6 +2495,8 @@ class Matrix(BaseType):
             )
             op = get_typed_op(op, self.dtype, other.dtype, kind="semiring")
             self._expect_op(op, "Semiring", within=method_name, argname="op")
+        if self._ncols == 0:
+            self = _empty_like(self)
 
         expr = MatrixExpression(
             method_name,
@@ -2840,6 +2856,8 @@ class Matrix(BaseType):
         # Also, SuiteSparse doesn't like user-defined binarops here.
         if op.opclass == "BinaryOp" and op.monoid is not None:
             op = op.monoid
+        if self._ncols == 0:
+            self = _empty_like(self)
         return VectorExpression(
             method_name,
             f"GrB_Matrix_reduce_{op.opclass}",
@@ -2878,6 +2896,8 @@ class Matrix(BaseType):
         # Also, SuiteSparse doesn't like user-defined binarops here.
         if op.opclass == "BinaryOp" and op.monoid is not None:
             op = op.monoid
+        if self._nrows == 0:
+            self = _empty_like(self)
         return VectorExpression(
             method_name,
             f"GrB_Matrix_reduce_{op.opclass}",
