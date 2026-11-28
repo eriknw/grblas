@@ -589,6 +589,27 @@ def test_extract_column(A):
     assert w2.isequal(result)
 
 
+def test_extract_assign_empty_list(A):
+    """An empty list index selects nothing, as an empty integer array does and as in numpy.
+
+    ``np.array([])`` is float64, so the index check rejected an empty list.
+    """
+    empty = np.array([], np.int64)
+    assert A[[], 2].new().isequal(Vector(A.dtype, 0))
+    assert A[6, []].new().isequal(Vector(A.dtype, 0))
+    assert A.T[[], 2].new().isequal(Vector(A.dtype, 0))
+    assert A[[], :].new().isequal(Matrix(A.dtype, 0, 7))
+    assert A[:, []].new().isequal(Matrix(A.dtype, 7, 0))
+    # Two lists select a submatrix (numpy pairs them instead), here with no rows
+    assert A[[], [1, 2]].new().isequal(A[empty, [1, 2]].new())
+    assert A[[], [1, 2]].new().shape == (0, 2)
+    B = A.dup()
+    B[[], 2] = 100
+    B[6, []] << Vector(A.dtype, 0)
+    B[[], :] = 100
+    assert B.isequal(A)
+
+
 def test_extract_input_mask():
     # A       M
     # 0 1 2   _ 0 1

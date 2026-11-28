@@ -260,7 +260,9 @@ class IndexerResolver:
                 raise TypeError(
                     f"Invalid type for index: {typ}; unable to convert to list"
                 ) from None
-        return self.parse_index(np.array(index), np.ndarray, size)
+        # np.array([]) is float64, but an empty list selects nothing, as in numpy
+        array = np.array(index) if index else np.empty(0, np.int64)
+        return self.parse_index(array, np.ndarray, size)
 
     def get_index(self, dim):
         """Return a new IndexerResolver with index for the selected dimension."""

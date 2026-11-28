@@ -480,6 +480,18 @@ def test_extract(v):
     assert w2.isequal(w)
 
 
+def test_extract_assign_empty_list(v):
+    """An empty list index selects nothing, as an empty integer array does and as in numpy.
+
+    ``np.array([])`` is float64, so the index check rejected an empty list.
+    """
+    assert v[[]].new().isequal(Vector(v.dtype, 0))
+    w = v.dup()
+    w[[]] = 100
+    w[[]] << Vector(v.dtype, 0)
+    assert w.isequal(v)
+
+
 def test_extract_array(v):
     w = Vector(v.dtype, 3)
     result = Vector.from_coo(np.array([0, 1]), np.array([1, 1]), size=3)
