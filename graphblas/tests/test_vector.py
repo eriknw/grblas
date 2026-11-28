@@ -3454,3 +3454,22 @@ def test_ss_import_values_size():
     )
     assert v.ss.is_iso
     assert v.to_coo()[1].tolist() == [[2.0, 3.0]] * 2
+
+
+def test_vector_repr_coo_form():
+    """A Vector sparse enough for the COO form shows its first entries on every backend.
+
+    The COO form read ``ss.head``, which the vanilla backend lacks. The header, which names
+    the format only on suitesparse, is left out of the comparison.
+    """
+    pd = pytest.importorskip("pandas")
+    v = Vector.from_coo([300, 500, 100, 700, 900], [1, 2, 3, 4, 5], size=1000)
+    with pd.option_context("display.max_rows", 4, "display.min_rows", 2):
+        for x, vals in [(v, ["3", "1"]), (v.V, ["1", "1"]), (~v.S, ["0", "0"])]:
+            assert repr(x).split("-\n", 1)[1] == (
+                "    index  val\n"
+                f"0     100    {vals[0]}\n"
+                f"1     300    {vals[1]}\n"
+                "...   ...  ..."
+            )
+            assert "<td>300</td>" in x._repr_html_()

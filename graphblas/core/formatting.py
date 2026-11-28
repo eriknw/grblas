@@ -273,12 +273,11 @@ def _get_matrix_dataframe(matrix, max_rows, min_rows, max_columns, *, mask=None)
         > 2 * df.count().sum()
     ):
         # The data is sparse and it's better to show in COO format.
-        # SS, SuiteSparse-specific: head
         num_rows = matrix._nvals if matrix._nvals <= max_rows else min_rows
         if matrix._is_transposed:
-            cols, rows, vals = matrix._matrix.ss.head(num_rows, sort=True)
+            cols, rows, vals = _head(matrix._matrix, num_rows)
         else:
-            rows, cols, vals = matrix.ss.head(num_rows, sort=True)
+            rows, cols, vals = _head(matrix, num_rows)
         if mask is not None:
             if mask.complement:
                 vals = np.zeros(vals.size, dtype=np.uint8)
@@ -294,7 +293,7 @@ def _get_matrix_dataframe(matrix, max_rows, min_rows, max_columns, *, mask=None)
         nonzero = matrix.apply(unary.one["UINT8"]).new(mask=matrix.V, name="")
         num_rows = matrix._nvals if matrix._nvals <= max_rows else min_rows
         if min(nonzero._nvals, num_rows) > 2 * df.count().sum():
-            rows, cols, vals = nonzero.ss.head(num_rows, sort=True)
+            rows, cols, vals = _head(nonzero, num_rows)
             if mask.complement:
                 if not vals.flags.writeable:  # pragma: no cover (safety)
                     vals = vals.copy()
@@ -327,9 +326,8 @@ def _get_vector_dataframe(vector, max_rows, min_rows, max_columns, *, mask=None)
         > 2 * df.count().sum()
     ):
         # The data is sparse and it's better to show in COO format.
-        # SS, SuiteSparse-specific: head
         num_rows = vector._nvals if vector._nvals <= max_rows else min_rows
-        indices, vals = vector.ss.head(num_rows, sort=True)
+        indices, vals = _head(vector, num_rows)
         if mask is not None:
             if mask.complement:
                 vals = np.zeros(vals.size, dtype=np.uint8)
@@ -345,7 +343,7 @@ def _get_vector_dataframe(vector, max_rows, min_rows, max_columns, *, mask=None)
         nonzero = vector.apply(unary.one["UINT8"]).new(mask=vector.V, name="")
         num_rows = vector._nvals if vector._nvals <= max_rows else min_rows
         if min(nonzero._nvals, num_rows) > 2 * df.count().sum():
-            indices, vals = nonzero.ss.head(num_rows, sort=True)
+            indices, vals = _head(nonzero, num_rows)
             if mask.complement:
                 if not vals.flags.writeable:  # pragma: no cover (safety)
                     vals = vals.copy()
@@ -355,6 +353,15 @@ def _get_vector_dataframe(vector, max_rows, min_rows, max_columns, *, mask=None)
                 df.loc["..."] = ["..."] * 2
             return df
     return df.where(pd.notna(df), "")
+
+
+def _head(x, n):
+    """Return the first ``n`` entries of a Matrix or Vector as sorted ``to_coo`` arrays."""
+    # SS, SuiteSparse-specific: head
+    if backend == "suitesparse":
+        return x.ss.head(n, sort=True)
+    # Vanilla has no head, so read every entry and keep the first n
+    return tuple(array[:n] for array in x.to_coo(sort=True))
 
 
 def get_format(x, is_transposed=False):

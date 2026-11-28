@@ -5426,6 +5426,38 @@ def test_matrix_subclass_repr():
     assert A.T._repr_html_() == B.T._repr_html_()
 
 
+def test_matrix_repr_coo_form():
+    """A Matrix sparse enough for the COO form shows its first entries on every backend.
+
+    The COO form read ``ss.head``, which the vanilla backend lacks. The header, which names
+    the format only on suitesparse, is left out of the comparison.
+    """
+    pd = pytest.importorskip("pandas")
+    A = Matrix.from_coo(
+        [300, 300, 500, 600, 700],
+        [400, 200, 500, 100, 900],
+        [1, 2, 3, 4, 5],
+        nrows=1000,
+        ncols=1000,
+    )
+    with pd.option_context("display.max_rows", 4, "display.min_rows", 2):
+        for x, vals in [(A, ["2", "1"]), (A.V, ["1", "1"]), (~A.S, ["0", "0"])]:
+            assert repr(x).split("-\n", 1)[1] == (
+                "     row  col  val\n"
+                f"0    300  200    {vals[0]}\n"
+                f"1    300  400    {vals[1]}\n"
+                "...  ...  ...  ..."
+            )
+            assert "<td>300</td>" in x._repr_html_()
+        # A.T shows A's first entries, so it is sorted by column (A's rows)
+        assert repr(A.T).split("-\n", 1)[1] == (
+            "     row  col  val\n"
+            "0    200  300    2\n"
+            "1    400  300    1\n"
+            "...  ...  ...  ..."
+        )
+
+
 @pytest.mark.skipif("not suitesparse")
 def test_subclass_error_text():
     # An error's text comes from GrB_<type name>_error, and a subclass has none of its own.
