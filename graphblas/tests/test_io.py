@@ -476,7 +476,7 @@ def test_mmwrite_transposed():
         # The coordinate format may list the entries in another order
         header = actual.getvalue().split(b"\n", 1)[0]
         assert header == expected.getvalue().split(b"\n", 1)[0]
-        if suitesparse and A is not S:
+        if suitesparse and A.ss.format in {"fullr", "fullc"}:
             assert header == b"%%MatrixMarket matrix array integer general"
             assert actual.getvalue() == expected.getvalue()
         actual.seek(0)

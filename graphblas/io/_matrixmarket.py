@@ -149,8 +149,8 @@ def mmwrite(
         from scipy.io import mmwrite
     except ImportError:  # pragma: no cover (import)
         raise ImportError("scipy is required to write Matrix Market files") from None
-    # A TransposedMatrix has no ss namespace for the full-format check below,
-    # so write its parent's array, transposed.
+    # A TransposedMatrix has no ss namespace, which the full-format check reads,
+    # so build the array from its parent and transpose that.
     is_transposed = type(matrix) is TransposedMatrix
     if is_transposed:
         matrix = matrix.T
@@ -190,7 +190,7 @@ def mmwrite(
     else:
         array = to_scipy_sparse(matrix, format="coo")
     if is_transposed:
-        array = array.T
+        array = array.T  # back from the parent to the TransposedMatrix (a view)
     mmwrite(
         target,
         array,
