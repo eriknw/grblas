@@ -1903,8 +1903,9 @@ def test_reduce_agg_empty():
 def test_reduce_mxm_mxv_empty_inner_iso():
     """Reducing or multiplying over a dimension of size 0 gives no entries for iso operands.
 
-    SuiteSparse returns an entry per output position there when the operands are iso, so this
-    catches a lost workaround. Accumulating the empty result leaves the output alone.
+    Accumulating the empty result leaves the output alone. Fails if a caller of
+    ``matrix._empty_like`` stops replacing the operand while SuiteSparse still returns entries
+    here.
     """
     A = Matrix("UINT8", nrows=3, ncols=0)
     A[...] = 5
@@ -1922,6 +1923,9 @@ def test_reduce_mxm_mxv_empty_inner_iso():
             w = reduce(op).new()
             assert w.size == size
             assert w.nvals == 0
+    # The stand-in for a TransposedMatrix is transposed too, so GraphBLAS gets the same descriptor
+    assert B.T.reduce_rowwise().at
+    assert not A.T.reduce_columnwise().at
     assert A.mxv(v).new().isequal(Vector("UINT8", 3))
     assert (A @ v).new().isequal(Vector("UINT8", 3))
     assert (A @ B).new().isequal(Matrix("UINT8", 3, 4))

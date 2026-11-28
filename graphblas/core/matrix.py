@@ -126,14 +126,24 @@ def _reposition(updater, indices, chunk):
 
 
 def _empty_like(A):
-    """Return a new empty Matrix with the shape and dtype of ``A``, to use in its place.
+    """Return a new empty Matrix with the shape, dtype and name of ``A``, to use in its place.
 
-    Callers use it when the dimension they reduce or multiply over has size 0, so the result
-    has no entries. SuiteSparse:GraphBLAS (checked through 10.5.3) gives an entry per output
-    position there when the operands are iso, such as a Matrix with a 0 dimension after
-    ``A[...] = 5``. A new Matrix is not iso. It takes the name of ``A``, so the expression
-    shows the operand the user gave. Other calls pay only for the check of the size.
+    The callers swap it in for an operand when the dimension they reduce or multiply over
+    has size 0, so that the result has no entries. In that case SuiteSparse:GraphBLAS
+    (checked through 10.5.3) returns an entry for every output position when the reduced
+    Matrix is iso, or, for a product, when both operands are iso, so replacing one operand
+    is enough. A Matrix with a 0 dimension is iso after ``A[...] = 5``; a new Matrix is
+    not. The name of ``A``, and for ``A.T`` the transpose, keep the expression's repr and
+    descriptor. Calls with no 0 dimension pay only for the size check.
+
+    Delete this function and the two-line guards that call it (``Matrix._mxv``, ``_mxm``,
+    ``reduce_rowwise``, ``reduce_columnwise``, ``Vector._vxm`` and ``_inner``) once every
+    supported SuiteSparse:GraphBLAS skips its iso full shortcut in ``GB_AxB_saxpy`` and
+    ``GB_AxB_dot`` when the inner dimension is 0. ``test_reduce_mxm_mxv_empty_inner_iso``
+    and ``test_vxm_inner_empty_inner_iso`` check the result with or without the guards.
     """
+    if A._is_transposed:
+        return _empty_like(A._matrix).T
     return Matrix(A.dtype, A._nrows, A._ncols, name=A.name)
 
 

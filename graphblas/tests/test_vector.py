@@ -1154,16 +1154,19 @@ def test_reduce_agg_empty_iso():
 def test_vxm_inner_empty_inner_iso():
     """``v @ A`` and ``v @ w`` over a size of 0 give no entries for iso operands.
 
-    SuiteSparse returns an entry per output position there when the operands are iso, so this
-    catches a lost workaround.
+    Accumulating the empty result leaves the output alone. Fails if a caller of
+    ``matrix._empty_like`` stops replacing the operand while SuiteSparse still returns entries
+    here.
     """
     v = Vector("UINT8", size=0)
     v[...] = 5
     A = Matrix("UINT8", nrows=0, ncols=4)
     A[...] = 5
+    C = Matrix("UINT8", nrows=4, ncols=0)
+    C[...] = 5
     assert v.vxm(A).new().isequal(Vector("UINT8", 4))
     assert (v @ A).new().isequal(Vector("UINT8", 4))
-    assert (v @ A.T.T).new().isequal(Vector("UINT8", 4))
+    assert (v @ C.T).new().isequal(Vector("UINT8", 4))
     assert v.inner(v).new().is_empty
     assert (v @ v).new().is_empty
     w = Vector.from_coo([0], [7], dtype="UINT8", size=4)
