@@ -8,6 +8,35 @@ ffi_new = ffi.new
 
 
 class Context(BaseConfig):
+    """Set ``nthreads`` and ``chunk`` for the GraphBLAS calls on one thread.
+
+    While a Context is engaged, GraphBLAS calls on the thread that engaged it use its
+    settings in place of the global ones in ``gb.ss.config``; other threads keep theirs.
+
+    .. code-block:: python
+
+        A = gb.Matrix.from_coo([0, 1], [1, 0], [1.0, 2.0])
+        with gb.ss.Context(nthreads=4):
+            C = (A @ A).new()
+
+    A new Context is engaged at once unless ``engage=False``. Leaving the ``with`` block,
+    or ``disengage()``, engages the Context that was current before, so Contexts nest.
+    Options left as None are copied from the current Context, or from the global settings
+    when ``stack=False``. Read and change options as items: ``ctx["nthreads"] = 2``.
+    For one operation, pass the options to it instead: ``(A @ A).new(nthreads=2)``.
+
+    Config parameters
+    -----------------
+    nthreads : int
+        Maximum number of OpenMP threads to use. 0 or negative copies the global
+        setting, ``gb.ss.config["nthreads"]``.
+    chunk : double
+        The least work to give each thread, so a small problem runs on fewer threads
+        (``floor(work / chunk)``, at most ``nthreads``). Below 1 means the default, 65536.
+    gpu_id : int
+        Only for SuiteSparse:GraphBLAS 10.1 and earlier; see ``gb.ss.config``.
+    """
+
     _context_keys = {"chunk", "gpu_id", "nthreads"}
     _options = {
         "chunk": (lib.GxB_CONTEXT_CHUNK, "double"),
